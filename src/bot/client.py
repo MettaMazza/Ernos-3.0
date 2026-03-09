@@ -200,8 +200,8 @@ class ErnosBot(commands.Bot):
         )
         self.engine_manager.register_engine("LocalSteer", steer_engine)
 
-        # Default to Cloud
-        self.engine_manager.set_active_engine("cloud")
+        # Default to Local
+        self.engine_manager.set_active_engine("local")
 
         # Register Channel Adapters (Synapse Bridge v3.1)
         self.channel_manager.register_adapter(DiscordChannelAdapter(self))
@@ -235,7 +235,9 @@ class ErnosBot(commands.Bot):
         logger.info(f"Loaded {loaded} skill(s) from {skills_dir}")
         
         
-        logger.info(f"Bot setup complete. Active: Cloud")
+        lite = getattr(settings, 'AUTONOMY_LITE_MODE', False)
+        mode_label = "Local" if self.engine_manager._active_key == "local" else "Cloud"
+        logger.info(f"Bot setup complete. Active: {mode_label} | Autonomy Lite: {'ON' if lite else 'OFF'}")
         
         # Start Lane Queue (Synapse Bridge v3.1)
         await self.lane_queue.start()

@@ -178,6 +178,11 @@ class TownHallDaemon:
             while self.is_running:
                 await asyncio.sleep(3600)  # ~1hr between turns
                 
+                # Lite Mode: Skip LLM-driven conversations
+                from config import settings  # type: ignore
+                if getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                    continue
+                
                 available = self._get_available_personas()
                 if len(available) < 2:
                     await asyncio.sleep(60)

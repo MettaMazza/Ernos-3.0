@@ -77,10 +77,14 @@ class AutonomyAbility(BaseAbility):
 
                         if not quota_met:
                             # WORK MODE: Drive Ernos to do dev work instead of recreation
-                            try:
-                                await self._run_dev_work_cycle(remaining_hours)
-                            except Exception as e:
-                                logger.error(f"Dev work cycle failed: {e}")
+                            # Skip in Lite Mode — codebase is retired
+                            if getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                                logger.debug("IMA: Lite mode — skipping dev work cycle")
+                            else:
+                                try:
+                                    await self._run_dev_work_cycle(remaining_hours)
+                                except Exception as e:
+                                    logger.error(f"Dev work cycle failed: {e}")
                             # Back off — don't check again for 2 minutes
                             self.bot.last_interaction = time.time() - 100
                             await asyncio.sleep(120)
@@ -337,26 +341,28 @@ class AutonomyAbility(BaseAbility):
                         
                         # ── Continuous Crawler ─────────────────
                         # Run one crawl cycle after each dream cycle
-                        try:
-                            from scripts.continuous_crawler import get_crawler
-                            # Use the bot's existing KG connection (hippocampus.graph)
-                            kg = getattr(self.bot.hippocampus, 'graph', None) if hasattr(self.bot, 'hippocampus') else None
-                            if kg is None:
-                                logger.warning("Crawler: No KG found on bot.hippocampus.graph — will run dry")
-                            crawler = get_crawler(kg=kg)
-                            crawl_result = await self.bot.loop.run_in_executor(
-                                None, crawler.crawl_cycle
-                            )
-                            if crawl_result and not crawl_result.get("skipped"):
-                                src = crawl_result.get("source", "?")
-                                new = crawl_result.get("new", 0)
-                                logger.info(f"🕷️ Crawler cycle: {src} → {new} new facts")
-                                if hasattr(self.bot, 'send_to_mind') and new > 0:
-                                    await self.bot.send_to_mind(
-                                        f"🕷️ **Knowledge Crawler** [{src}]: Ingested {new} new facts"
-                                    )
-                        except Exception as e:
-                            logger.debug(f"Crawler cycle skipped: {e}")
+                        # Skip in Lite Mode — reduces overhead
+                        if not getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                            try:
+                                from scripts.continuous_crawler import get_crawler
+                                # Use the bot's existing KG connection (hippocampus.graph)
+                                kg = getattr(self.bot.hippocampus, 'graph', None) if hasattr(self.bot, 'hippocampus') else None
+                                if kg is None:
+                                    logger.warning("Crawler: No KG found on bot.hippocampus.graph — will run dry")
+                                crawler = get_crawler(kg=kg)
+                                crawl_result = await self.bot.loop.run_in_executor(
+                                    None, crawler.crawl_cycle
+                                )
+                                if crawl_result and not crawl_result.get("skipped"):
+                                    src = crawl_result.get("source", "?")
+                                    new = crawl_result.get("new", 0)
+                                    logger.info(f"🕷️ Crawler cycle: {src} → {new} new facts")
+                                    if hasattr(self.bot, 'send_to_mind') and new > 0:
+                                        await self.bot.send_to_mind(
+                                            f"🕷️ **Knowledge Crawler** [{src}]: Ingested {new} new facts"
+                                        )
+                            except Exception as e:
+                                logger.debug(f"Crawler cycle skipped: {e}")
                     
                     # Debounce: Update last interaction to prevent spamming
                     self.bot.last_interaction = time.time() - 100  # Allow re-trigger in ~80s if still idle

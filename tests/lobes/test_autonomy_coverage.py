@@ -267,8 +267,9 @@ async def test_pure_thought_limit(mock_autonomy):
     with patch("src.tools.weekly_quota.is_quota_met", return_value=True):
         with patch("asyncio.sleep", side_effect=sleep_side):
              await mock_autonomy.execute()
-             # Pure thought limit is step >= 4, steps 0-4 = 5 iterations + break = 6 calls
-             assert mock_autonomy.bot.loop.run_in_executor.call_count == 6
+             # Pure thought limit is step >= 4, steps 0-4 = 5 iterations
+             # (crawler skipped in lite mode, so no extra executor call)
+             assert mock_autonomy.bot.loop.run_in_executor.call_count == 5
 
 @pytest.mark.asyncio
 async def test_autonomy_already_running(mock_autonomy):
@@ -295,8 +296,9 @@ async def test_autonomy_hard_step_limit(mock_autonomy):
         with patch("asyncio.sleep", side_effect=sleep_side):
             with patch("src.tools.registry.ToolRegistry.execute", return_value="OK"):
                  await mock_autonomy.execute()
-                 # Should hit step > 10 limit (steps 0-11 = 12 calls, break at step > 10 after increment)
-                 assert mock_autonomy.bot.loop.run_in_executor.call_count == 12
+                 # Should hit step > 10 limit (steps 0-10 = 11 calls)
+                 # (crawler skipped in lite mode, so no extra executor call)
+                 assert mock_autonomy.bot.loop.run_in_executor.call_count == 11
 
 @pytest.mark.asyncio
 async def test_autonomy_cycle_exception(mock_autonomy):

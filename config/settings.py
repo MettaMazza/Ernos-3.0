@@ -67,7 +67,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # Used for /cloud (RAG enabled)
 OLLAMA_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "gemini-3-flash-preview:cloud")
 # Used for /local (RAG enabled)
-OLLAMA_LOCAL_MODEL = os.getenv("OLLAMA_LOCAL_MODEL", "qwen3-vl:32b")
+OLLAMA_LOCAL_MODEL = os.getenv("OLLAMA_LOCAL_MODEL", "qwen3.5:35b")
 
 # Context Window Limits (Characters)
 # Cloud: ~1M tokens * 4 chars = ~4M chars
@@ -111,6 +111,12 @@ if NEO4J_PASSWORD == "password":
     logger.warning("NEO4J_PASSWORD is using the default 'password' — set a strong password via .env before production deployment")
 
 logger.info(f"Loaded config. Local: {OLLAMA_LOCAL_MODEL}, Local2 (Steering): {STEERING_MODEL_PATH}")
+
+# --- Autonomy Lite Mode ---
+# When True, disables heavy background autonomy (Dev Work Mode, Town Hall, Crawler)
+# while keeping core consciousness (dream loop, agency, KG extraction) active.
+# Set to True when the codebase is retired but Ernos should continue living.
+AUTONOMY_LITE_MODE = os.getenv("AUTONOMY_LITE_MODE", "true").lower() in ("true", "1", "yes")
 
 # --- Voice System (Kokoro ONNX) ---
 # Paths relative to project root
