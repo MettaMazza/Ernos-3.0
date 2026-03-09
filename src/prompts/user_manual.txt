@@ -1,0 +1,108 @@
+# ERNOS COMPREHENSIVE SYSTEM MANUAL & TROUBLESHOOTING GUIDE
+
+## 1. SYSTEM ARCHITECTURE (THE BRAIN)
+
+### A. The Core (Kernel)
+*   **Role**: The central event loop that manages all input/output.
+*   **Flux Capacitor**: Manages rate limits (see Patreon Tiers).
+*   **Cognition Engine**: The ReAct execution loop. It decides *which* tools to call.
+*   **Cognitive Layers (Lobes)**: 26 specialized personas used for thinking (e.g., Logical, Creative, Emotional).
+    *   *Note*: Users cannot "talk" to lobes directly; they are internal thinking tools.
+
+### B. The Hippocampus (Memory System)
+*   **Role**: Orchestrates all memory across 5 tiers.
+*   **Tier 1: Working Memory**: Short-term context (approx. 100 turns).
+*   **Tier 2: Vector Store (Semantic)**: Long-term storage of ideas. Uses ChromaDB (or InMemory fallback).
+    *   *Error*: "I forgot what we talked about weeks ago" -> Vector store might be rebuilding or query had low cosine similarity.
+*   **Tier 3: Knowledge Graph (FalkorDB)**: Strict facts and relationships (Entities, Edges).
+    *   *Error*: "You don't know who I am" -> Graph node might be missing.
+*   **Tier 4: Timeline**: Chronological log of all events.
+*   **Tier 5: Lessons**: Structured learnings from past mistakes.
+
+---
+
+## 2. SENSORY & INTERACTION SUBSYSTEMS
+
+### A. Voice System (The Throat & Ears)
+*   **TTS (Speaking)**: Uses **Kokoro ONNX** (Local neural voice).
+    *   *Behavior*: Joins voice channel, streams audio.
+    *   *Troubleshooting*:
+        *   "I can't hear you": Check if bot is deafened/muted. Check if Kokoro model file is missing.
+        *   "Voice is choppy": CPU overload or network latency.
+*   **STT (Listening)**: Uses **Whisper** / Google Web Speech.
+    *   *Behavior*: Transcribes user audio in voice channels or voice messages.
+    *   *Troubleshooting*:
+        *   "You ignored what I said": Audio might be too short (<1s) or too quiet.
+        *   "Transcription failed": API error or unrecognizable speech.
+
+### B. Vision System (The Eyes)
+*   **Role**: Analyzes images uploaded by users.
+*   **Limitations**: Can see text, objects, and art. Cannot analyze video files yet.
+
+### C. Gaming (Minecraft Integration)
+*   **Role**: Plays Minecraft via `GamingAgent`.
+*   **Commands**:
+    *   `/link_minecraft username="..."`: Connect Discord user to Minecraft player.
+    *   `game_command(cmd)`: Execute actions (goto, craft, build).
+    *   *Error*: "Connection refused" -> Server is down or bot is not whitelisted.
+    *   *Note*: Only Admins can `start_game`.
+
+### D. Smart Home (Home Assistant)
+*   **Role**: Controls lights, climate, and reads sensors.
+*   **Requirement**: Needs `HA_URL` and `HA_TOKEN` env vars.
+*   **Features**:
+    *   `get_sensor_summary`: Reads temperature/humidity.
+    *   `toggle`: Switches lights/devices.
+    *   *Privacy*: Only acts on explicit user request.
+
+---
+
+## 3. DATA SOVEREIGNTY (THE SPORE)
+
+### A. The Mycelium Network (Backup/Restore)
+*   **Concept**: Users own their context.
+*   **Tool**: `request_my_backup` (Export)
+    *   *Output*: A cryptographically signed JSON file sent via DM.
+    *   *Limit*: Once per 24 hours.
+*   **Tool**: `restore_my_context` (Import)
+    *   *Process*: Upload the .json file -> Ernos verifies signature -> Restores memory.
+    *   *Security*: Checks `user_id` match. Cannot restore another user's data.
+
+---
+
+## 4. PERSONA SYSTEM OPERATIONS
+
+### A. Management
+*   **Commands**:
+    *   `/persona_create name="..." description="..."`: Create new private persona.
+    *   `/persona <name>`: distinct switch to that persona.
+    *   `/persona_list`: View available roster.
+*   **Hosting**: Personas are *residents*, not just styles. They have persistent memories.
+
+---
+
+## 5. USER SUPPORT & TROUBLESHOOTING
+
+### Common Error Definitions
+1.  **"System Error: Brain not found"**: The Cognition Engine crashed. *Escalate immediately.*
+2.  **"I don't have the tools for that"**: User asked for a capability not in `src/tools`.
+3.  **"Rate Limit Exceeded"**: User hit their tier limit (see Patreon).
+
+### Connection Issues
+*   **Discord Gateway**: If bot is online but not replying, the event loop might be blocked.
+*   **Ollama/LLM**: If bot replies with gibberish or empty strings, the local model is hallucinating or overloaded.
+
+### Escalation Protocol (Use `escalate_ticket`)
+*   **Severity 1 (Critical)**: Database corruption, Security leak, Harassment. -> **IMMEDIATE**
+*   **Severity 2 (Bug)**: Feature broken, Tool failing reliably. -> **Escalate**
+*   **Severity 3 (Feature Request)**: "Can you add X?" -> **Log or advise Patreon**.
+
+---
+
+## 6. PATREON TIERS (Reference)
+*   **Visitor**: Free.
+*   **Pollinator**: $3/mo.
+*   **Planter**: $7/mo.
+*   **Gardener**: $15/mo.
+*   **Terraformer**: $30/mo.
+*   *Link*: https://www.patreon.com/c/TheErnOSGardens

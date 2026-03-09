@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Logs
+*.log
+
+# Memory (runtime data)
+memory/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.coverage
+coverage.xml
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Generated/temp files
+tool_locations.txt
+coverage_*.txt
+test_output.*
+test_results.*
+audit_mocks_output.txt
+investigation_logs.txt
+user_report_data.json

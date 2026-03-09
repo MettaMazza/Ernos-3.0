@@ -1,0 +1,14 @@
+{
+    "name": "ernos-mineflayer",
+    "version": "1.0.0",
+    "description": "Mineflayer bot for Ernos gaming",
+    "main": "bot.js",
+    "dependencies": {
+        "canvas": "^3.2.1",
+        "mineflayer": "^4.14.0",
+        "mineflayer-pathfinder": "^2.4.5",
+        "prismarine-viewer": "^1.33.0",
+        "puppeteer": "^24.37.1",
+        "vec3": "^0.1.10"
+    }
+}

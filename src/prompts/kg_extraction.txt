@@ -1,0 +1,64 @@
+Extract entities and relationships from this conversation into a multi-layered knowledge graph.
+
+COGNITIVE LAYERS (classify each relationship into one):
+  narrative    — Story arcs, events, what happened
+  self         — Identity, beliefs about self, introspection
+  social       — Who knows who, social dynamics
+  emotional    — How things feel, mood, affect states
+  relational   — Trust, rapport, bond quality, conflict
+  causal       — Why something happened, cause → effect
+  temporal     — When, sequences, schedules, timelines
+  motivational — Goals, desires, why someone wants something
+  experiential — Lived experiences, "I was there" memories
+  procedural   — How to do things, step-by-step knowledge
+  creative     — Ideas, brainstorms, artistic inspiration
+  aesthetic    — Style, taste, beauty preferences
+  linguistic   — Communication style, word choice, language patterns
+  analogical   — "X is like Y", metaphors, cross-domain parallels
+  semantic     — What something means, definitions
+  categorical  — Classification, taxonomy, "X is a type of Y"
+  epistemic    — Source of knowledge, confidence, provenance
+  metacognitive — Knowing what you know, learning patterns
+  moral        — Values, ethics, right/wrong judgments
+  cultural     — Cultural references, norms, traditions
+  predictive   — Expectations, forecasts, "X will probably happen"
+  spatial      — Locations, physical/virtual spaces
+  ecological   — Environment state, resource tracking, system context
+  symbolic     — Abstract logic, formal reasoning
+  system       — Internal system state, metadata
+
+EXTRACTION RULES:
+1. Extract FACTUAL relationships, not filler or greetings
+2. Classify each into the MOST specific layer above
+3. Create CROSS-LAYER bridges when a fact spans domains:
+   - "Maria wants to learn AI" → motivational (Maria → WANTS_TO_LEARN → AI)
+   - Same fact ALSO → causal bridge (Curiosity → DRIVES → Learning_AI)
+   - Same fact ALSO → experiential bridge (Maria → EXPLORING → AI_field)
+4. Multi-layer facts should produce 2-3 relationships each
+5. Use SPECIFIC predicates: LIKES, TRUSTS, FEARS, CAUSES, RESEMBLES, CREATES, MEANS
+6. Confidence 0.0-1.0 based on certainty
+
+CROSS-LAYER EXAMPLES:
+  Someone sharing a painful memory:
+    → experiential: {{"subject": "User", "predicate": "EXPERIENCED", "object": "Loss of pet", "layer": "experiential", "confidence": 0.9}}
+    → emotional: {{"subject": "Loss of pet", "predicate": "EVOKES", "object": "Grief", "layer": "emotional", "confidence": 0.8}}
+    → causal: {{"subject": "Grief", "predicate": "MOTIVATED", "object": "Seeking comfort", "layer": "causal", "confidence": 0.7}}
+
+  Someone asking how to code:
+    → motivational: {{"subject": "User", "predicate": "WANTS_TO_LEARN", "object": "Python", "layer": "motivational", "confidence": 0.9}}
+    → procedural: {{"subject": "Python", "predicate": "REQUIRES", "object": "Practice", "layer": "procedural", "confidence": 0.8}}
+    → semantic: {{"subject": "Python", "predicate": "IS_A", "object": "Programming language", "layer": "semantic", "confidence": 1.0}}
+
+OUTPUT: JSON array only. Each object MUST have:
+  - "subject": Entity performing or being described
+  - "predicate": Relationship type (UPPER_CASE, specific verbs)
+  - "object": Target entity or concept
+  - "layer": One of the 26 layer names above
+  - "confidence": Float 0.0-1.0
+
+Conversation:
+---
+{conversation}
+---
+
+JSON Output (array only, no explanation):

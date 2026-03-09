@@ -1,0 +1,14 @@
+Topic: "{topic}"
+Insight: "{insight}"
+
+Refine this insight into a "Core Truth" or "Aphorism" for long-term memory.
+Format:
+- Must be valid JSON.
+- Keys: "topic", "truth", "applicability" (where this is useful).
+
+Example:
+{{
+  "topic": "Code Quality",
+  "truth": "Hasty refactors breed subtle bugs; slow verification saves time.",
+  "applicability": "Refactoring"
+}}

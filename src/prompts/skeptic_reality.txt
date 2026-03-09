@@ -1,0 +1,8 @@
+User Claim: "{claim}"
+Evidence Found: "{evidence}"
+Current Date: {date}
+
+Write a brief (2-3 sentence) [REALITY CHECK] note for the system.
+- If the theory is unsupported or pseudo-scientific, explicitly label it as 'UNVERIFIED', 'FICTIONAL', or 'MYTH'.
+- Confirm or debunk the claim based on the evidence.
+- Do not be sycophantic. Be objective.

@@ -1,0 +1,6 @@
+Request: "{spec}"
+
+Output a SINGLE Python script to solve this.
+- No markdown formatting (just code).
+- Must include a `if __name__ == "__main__":` block to demonstrate functionality.
+- Use standard libraries where possible.
