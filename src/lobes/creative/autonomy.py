@@ -167,6 +167,18 @@ class AutonomyAbility(BaseAbility):
                                     try:
                                         logger.info(f"IMA Executing Tool: {tool_name}")
                                         
+                                        # LITE MODE: Block heavy/GPU-intensive tools
+                                        if getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                                            LITE_BLOCKED_TOOLS = {
+                                                "generate_image", "generate_video",
+                                                "produce_audiobook", "create_program",
+                                                "surgical_edit", "execute_technical_plan",
+                                            }
+                                            if tool_name in LITE_BLOCKED_TOOLS:
+                                                logger.info(f"IMA: Lite mode — blocking heavy tool '{tool_name}'")
+                                                context_history += f"\n[TOOL RESULT {tool_name}]: Blocked (Autonomy Lite Mode — heavy tools disabled)"
+                                                continue
+                                        
                                         # LIMIT CHECK
                                         if tool_name == "add_reaction":
                                             if tool_usage_counts[tool_name] >= 3:
