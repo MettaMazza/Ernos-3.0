@@ -1,0 +1,150 @@
+"""
+Security Tests for Scope Isolation.
+Ensures PUBLIC scope cannot access PRIVATE or CORE scoped data.
+"""
+import pytest
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch, AsyncMock
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.privacy.scopes import PrivacyScope, ScopeManager
+from src.privacy.guard import scope_protected, validate_path_scope, scope_write_path
+
+
+# MIGRATED to tests/security/test_security_core.py
+class TestScopeManager_DEPRECATED:
+    """Tests for ScopeManager.check_access()"""
+    
+    def test_core_can_access_everything(self):
+        """CORE scope should access CORE, PRIVATE, and PUBLIC."""
+        assert ScopeManager.check_access(PrivacyScope.CORE, PrivacyScope.CORE) == True
+        assert ScopeManager.check_access(PrivacyScope.CORE, PrivacyScope.PRIVATE) == True
+        assert ScopeManager.check_access(PrivacyScope.CORE, PrivacyScope.PUBLIC) == True
+        
+    def test_private_can_access_private_and_public(self):
+        """PRIVATE scope should access PRIVATE and PUBLIC, but NOT CORE."""
+        assert ScopeManager.check_access(PrivacyScope.PRIVATE, PrivacyScope.CORE) == False
+        assert ScopeManager.check_access(PrivacyScope.PRIVATE, PrivacyScope.PRIVATE) == True
+        assert ScopeManager.check_access(PrivacyScope.PRIVATE, PrivacyScope.PUBLIC) == True
+        
+    def test_public_can_only_access_public(self):
+        """PUBLIC scope should ONLY access PUBLIC data."""
+        assert ScopeManager.check_access(PrivacyScope.PUBLIC, PrivacyScope.CORE) == False
+        assert ScopeManager.check_access(PrivacyScope.PUBLIC, PrivacyScope.PRIVATE) == False
+        assert ScopeManager.check_access(PrivacyScope.PUBLIC, PrivacyScope.PUBLIC) == True
+
+
+class TestPathValidation:
+    """Tests for validate_path_scope()"""
+    
+    def test_public_cannot_access_core_paths(self):
+        """PUBLIC scope blocked from memory/core/"""
+        assert validate_path_scope("memory/core/reasoning.log", PrivacyScope.PUBLIC) == False
+        assert validate_path_scope("memory/core/journal.md", PrivacyScope.PUBLIC) == False
+        
+    def test_public_cannot_access_private_paths(self):
+        """PUBLIC scope blocked from memory/users/"""
+        assert validate_path_scope("memory/users/12345/timeline.jsonl", PrivacyScope.PUBLIC) == False
+        
+    def test_public_can_access_public_paths(self):
+        """PUBLIC scope can access memory/public/"""
+        assert validate_path_scope("memory/public/bridge.log", PrivacyScope.PUBLIC) == True
+        assert validate_path_scope("memory/public/research_topic.md", PrivacyScope.PUBLIC) == True
+        
+    def test_core_can_access_all_paths(self):
+        """CORE scope can access everything."""
+        assert validate_path_scope("memory/core/reasoning.log", PrivacyScope.CORE) == True
+        assert validate_path_scope("memory/users/12345/data.json", PrivacyScope.CORE) == True
+        assert validate_path_scope("memory/public/bridge.log", PrivacyScope.CORE) == True
+
+
+class TestScopeWritePath:
+    """Tests for scope_write_path()"""
+    
+    def test_core_writes_to_core(self):
+        assert scope_write_path(PrivacyScope.CORE) == "memory/core"
+        
+    def test_private_writes_to_user_silo(self, tmp_path):
+        with patch("src.privacy.guard.data_dir", return_value=tmp_path):
+            result = scope_write_path(PrivacyScope.PRIVATE, user_id=12345)
+            assert result == str(tmp_path / "users/12345")
+        
+    def test_public_writes_to_public(self):
+        assert scope_write_path(PrivacyScope.PUBLIC) == "memory/public"
+
+
+class TestBackupSecurity:
+    """Tests for backup import security."""
+    
+    @pytest.mark.asyncio
+    async def test_cannot_import_other_users_backup(self):
+        """User A cannot restore User B's backup."""
+        from src.backup.manager import BackupManager
+        
+        backup_mgr = BackupManager()
+        
+        # Create backup for user 111
+        fake_backup = {
+            "user_id": 111,
+            "exported_at": "2026-02-05T12:00:00",
+            "format_version": "2.0",
+            "context": {"test.txt": "hello"},
+            "checksum": ""  # Will be computed
+        }
+        fake_backup["checksum"] = backup_mgr._compute_checksum(fake_backup)
+        
+        # User 999 tries to import user 111's backup
+        success, message = await backup_mgr.import_user_context(999, fake_backup)
+        
+        assert success == False
+        assert "different user" in message.lower() or "access denied" in message.lower()
+        
+    @pytest.mark.asyncio
+    async def test_tampered_backup_rejected(self):
+        """Backup with modified content should be rejected."""
+        from src.backup.manager import BackupManager
+        
+        backup_mgr = BackupManager()
+        
+        # Create valid backup
+        fake_backup = {
+            "user_id": 123,
+            "exported_at": "2026-02-05T12:00:00",
+            "format_version": "2.0",
+            "context": {"test.txt": "original content"},
+        }
+        fake_backup["checksum"] = backup_mgr._compute_checksum(fake_backup)
+        
+        # Tamper with content
+        fake_backup["context"]["test.txt"] = "TAMPERED CONTENT"
+        
+        # Verification should fail
+        is_valid, reason = backup_mgr.verify_backup(fake_backup)
+        
+        assert is_valid == False
+        # Update expectation to match actual error message
+        assert "tampered" in reason.lower() or "different system salt" in reason.lower()
+
+
+class TestReviewMyReasoningSecurity:
+    """Tests for review_my_reasoning scope enforcement."""
+    
+    def test_public_blocked_from_core_traces(self):
+        """PUBLIC scope should be blocked from memory/core/reasoning.log"""
+        # This test validates the path check logic
+        assert validate_path_scope("memory/core/reasoning.log", PrivacyScope.PUBLIC) == False
+        
+    def test_private_blocked_from_core_traces(self):
+        """PRIVATE scope should be blocked from memory/core/"""
+        assert validate_path_scope("memory/core/reasoning.log", PrivacyScope.PRIVATE) == False
+
+
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

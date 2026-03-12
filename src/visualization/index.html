@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ernos — Knowledge Graph Visualizer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e8;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* === HUD Overlay === */
+        #hud {
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: auto;
+        }
+
+        .hud-panel {
+            background: rgba(10, 10, 20, 0.85);
+            border: 1px solid rgba(100, 100, 255, 0.15);
+            border-radius: 12px;
+            padding: 14px 18px;
+            backdrop-filter: blur(12px);
+            min-width: 220px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .hud-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #888;
+            margin-bottom: 8px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+            font-size: 13px;
+        }
+
+        .stat-label {
+            color: #999;
+        }
+
+        .stat-value {
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* === Layer Legend === */
+        #legend {
+            position: fixed;
+            bottom: 16px;
+            left: 16px;
+            z-index: 100;
+        }
+
+        .legend-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            max-width: 450px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            padding: 3px 8px;
+            background: rgba(20, 20, 30, 0.7);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        .legend-item:hover {
+            background: rgba(40, 40, 60, 0.9);
+        }
+
+        .legend-item.dimmed {
+            opacity: 0.25;
+        }
+
+        .layer-toggle-btns {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 6px;
+        }
+
+        .layer-toggle-btn {
+            flex: 1;
+            background: rgba(20, 20, 40, 0.8);
+            border: 1px solid rgba(100, 100, 255, 0.2);
+            color: #999;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+        }
+
+        .layer-toggle-btn:hover {
+            background: rgba(80, 80, 200, 0.3);
+            color: #fff;
+            border-color: rgba(120, 120, 255, 0.5);
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        /* === Filter Panel === */
+        #filters {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 100;
+        }
+
+        .filter-btn {
+            background: rgba(20, 20, 40, 0.8);
+            border: 1px solid rgba(100, 100, 255, 0.2);
+            color: #bbb;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .filter-btn:hover,
+        .filter-btn.active {
+            background: rgba(80, 80, 200, 0.3);
+            color: #fff;
+            border-color: rgba(120, 120, 255, 0.5);
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        /* === Crawler Panel === */
+        #crawler-panel {
+            position: fixed;
+            bottom: 16px;
+            right: 16px;
+            z-index: 100;
+        }
+
+        .crawler-status {
+            font-size: 12px;
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: rgba(10, 10, 20, 0.6);
+        }
+
+        .crawler-status.active {
+            color: #6cffa8;
+        }
+
+        .crawler-status.idle {
+            color: #888;
+        }
+
+        .crawler-btn {
+            background: rgba(20, 30, 50, 0.9);
+            border: 1px solid rgba(100, 200, 150, 0.25);
+            color: #8cf;
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .crawler-btn:hover {
+            background: rgba(40, 60, 100, 0.9);
+            color: #fff;
+            border-color: rgba(100, 200, 150, 0.5);
+        }
+
+        .crawler-btn.stop {
+            border-color: rgba(255, 100, 100, 0.3);
+            color: #f88;
+        }
+
+        .crawler-btn.stop:hover {
+            background: rgba(100, 30, 30, 0.9);
+            border-color: rgba(255, 100, 100, 0.5);
+        }
+
+        .crawler-btns {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .crawler-sources {
+            font-size: 10px;
+            color: #666;
+            margin-top: 6px;
+            line-height: 1.6;
+        }
+
+        .source-tag {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(40, 40, 60, 0.6);
+            margin: 1px;
+        }
+
+        .source-tag.due {
+            color: #6cffa8;
+            background: rgba(20, 80, 40, 0.4);
+        }
+
+        .source-tag.waiting {
+            color: #666;
+        }
+
+        /* === Tooltip === */
+        #tooltip {
+            position: fixed;
+            display: none;
+            background: rgba(10, 10, 25, 0.95);
+            border: 1px solid rgba(100, 120, 255, 0.3);
+            border-radius: 10px;
+            padding: 12px 16px;
+            font-size: 12px;
+            max-width: 300px;
+            z-index: 200;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+        }
+
+        #tooltip .tt-name {
+            font-weight: 700;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        #tooltip .tt-layer {
+            font-size: 11px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        #tooltip .tt-props {
+            font-size: 11px;
+            color: #aaa;
+            line-height: 1.5;
+        }
+
+        /* === Quarantine Badge === */
+        .q-badge {
+            position: fixed;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            background: rgba(200, 50, 50, 0.2);
+            border: 1px solid rgba(255, 80, 80, 0.4);
+            border-radius: 10px;
+            padding: 8px 20px;
+            font-size: 12px;
+            color: #ff6b6b;
+            display: none;
+        }
+
+        /* === Loading === */
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #0a0a0f;
+            z-index: 500;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(100, 100, 255, 0.2);
+            border-top: 3px solid #6c6cff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-text {
+            font-size: 13px;
+            color: #666;
+            letter-spacing: 1px;
+        }
+
+        #graph-container {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* === Cluster View === */
+        #back-btn {
+            position: fixed;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 150;
+            background: rgba(80, 80, 200, 0.3);
+            border: 1px solid rgba(120, 120, 255, 0.5);
+            color: #fff;
+            padding: 10px 24px;
+            border-radius: 10px;
+            font-size: 13px;
+            cursor: pointer;
+            display: none;
+            transition: all 0.2s;
+            backdrop-filter: blur(10px);
+        }
+
+        #back-btn:hover {
+            background: rgba(100, 100, 255, 0.5);
+        }
+
+        #view-info {
+            position: fixed;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 150;
+            font-size: 12px;
+            color: #888;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            pointer-events: none;
+        }
+
+
+        #view-toggle {
+            background: rgba(20, 20, 40, 0.8);
+            border: 1px solid rgba(100, 100, 255, 0.2);
+            color: #bbb;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        #view-toggle:hover {
+            background: rgba(80, 80, 200, 0.3);
+            color: #fff;
+            border-color: rgba(120, 120, 255, 0.5);
+        }
+
+        #view-toggle.active {
+            background: rgba(80, 80, 200, 0.3);
+            color: #fff;
+            border-color: rgba(120, 120, 255, 0.5);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div class="loading-text">LOADING KNOWLEDGE GRAPH...</div>
+    </div>
+
+    <button id="back-btn" onclick="showClusterView()">← Back to Cluster View</button>
+    <div id="view-info">CLUSTER VIEW — Click a layer to explore</div>
+
+
+    <div id="hud">
+        <div class="hud-panel">
+            <div class="hud-title">Knowledge Graph</div>
+            <div class="stat-row"><span class="stat-label">Nodes</span><span class="stat-value" id="s-nodes">—</span>
+            </div>
+            <div class="stat-row"><span class="stat-label">Edges</span><span class="stat-value" id="s-edges">—</span>
+            </div>
+            <div class="stat-row"><span class="stat-label">Layers</span><span class="stat-value" id="s-layers">—</span>
+            </div>
+        </div>
+        <div class="hud-panel">
+            <div class="hud-title">Health</div>
+            <div class="stat-row"><span class="stat-label">Quarantined</span><span class="stat-value"
+                    id="s-quarantine">—</span></div>
+            <div class="stat-row"><span class="stat-label">Orphaned</span><span class="stat-value"
+                    id="s-orphaned">—</span></div>
+            <div class="stat-row"><span class="stat-label">Score</span><span class="stat-value" id="s-health">—</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="filters">
+        <div class="filter-group">
+            <button class="filter-btn active" data-scope="all">All</button>
+            <button class="filter-btn" data-scope="PUBLIC">Public</button>
+            <button class="filter-btn" data-scope="PRIVATE">Private</button>
+            <button class="filter-btn" data-scope="CORE">Core</button>
+            <button class="filter-btn" data-scope="CORE_PUBLIC">Seeded</button>
+            <button class="filter-btn" data-scope="CORE_PRIVATE">Core Private</button>
+        </div>
+        <div class="filter-group" style="margin-top: 4px;">
+            <button id="view-toggle" onclick="toggleFullView()">🧠 Full Brain View</button>
+        </div>
+    </div>
+
+    <!-- Crawler Control Panel -->
+    <div id="crawler-panel">
+        <div class="hud-panel">
+            <div class="hud-title">🕷️ Knowledge Crawler</div>
+            <div class="crawler-status idle" id="crawler-status">Checking...</div>
+            <div class="stat-row"><span class="stat-label">Facts Ingested</span><span class="stat-value"
+                    id="cr-facts">—</span></div>
+            <div class="stat-row"><span class="stat-label">Crawl Cycles</span><span class="stat-value"
+                    id="cr-cycles">—</span></div>
+            <div class="stat-row"><span class="stat-label">Visited URLs</span><span class="stat-value"
+                    id="cr-urls">—</span></div>
+            <div class="crawler-sources" id="cr-sources"></div>
+            <div class="crawler-btns" style="margin-top: 8px;">
+                <button class="crawler-btn" onclick="crawlForce('rss')">📰 RSS</button>
+                <button class="crawler-btn" onclick="crawlForce('ddg')">🔍 DDG</button>
+                <button class="crawler-btn" onclick="crawlForce('articles')">📄 Articles</button>
+                <button class="crawler-btn" onclick="crawlForce('dbpedia')">🗂 DBpedia</button>
+            </div>
+            <div class="crawler-btns" style="margin-top: 6px;">
+                <button class="crawler-btn" onclick="crawlForce(null)" style="flex:1">▶ Run Cycle</button>
+                <button class="crawler-btn" onclick="refreshGraph()" style="flex:1">🔄 Refresh Graph</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="legend">
+        <div class="hud-panel">
+            <div class="hud-title">Cognitive Layers</div>
+            <div class="layer-toggle-btns">
+                <button class="layer-toggle-btn" onclick="selectAllLayers()">✓ All</button>
+                <button class="layer-toggle-btn" onclick="deselectAllLayers()">✕ None</button>
+            </div>
+            <div class="legend-grid" id="legend-grid"></div>
+        </div>
+    </div>
+
+    <div class="q-badge" id="q-badge">⚠️ <span id="q-count">0</span> quarantined entries</div>
+    <div id="tooltip">
+        <div class="tt-name"></div>
+        <div class="tt-layer"></div>
+        <div class="tt-props"></div>
+    </div>
+    <div id="graph-container"></div>
+
+    <script src="https://unpkg.com/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script>
+        // ─── Layer Colors ───────────────────────────────────────────────
+        const LAYER_COLORS = {
+            narrative: '#6c8cff', self: '#ff6cb0', social: '#6cffa8',
+            internal: '#ffa86c', spatial: '#6cfff2', causal: '#f26cff',
+            temporal: '#ffea6c', moral: '#ff6c6c', symbolic: '#b06cff',
+            procedural: '#6cffb8', categorical: '#98b0c8', aesthetic: '#ff9eee',
+            predictive: '#6cb8ff', cultural: '#ffc46c', epistemic: '#c6ff6c',
+            system: '#888888', emotional: '#ff4d6d', relational: '#ff8fab',
+            motivational: '#ffd166', experiential: '#06d6a0', linguistic: '#118ab2',
+            analogical: '#ef476f', metacognitive: '#8338ec', semantic: '#3a86a7',
+            ecological: '#2d6a4f', creative: '#f72585'
+        };
+
+        let graphData = { nodes: [], links: [] };
+        let activeScope = 'all';
+        let hiddenLayers = new Set();
+        let Graph = null;
+        let viewMode = 'cluster'; // 'cluster', 'expanded', or 'full'
+        let expandedLayer = null;
+        const urlParams = new URLSearchParams(window.location.search);
+        const startInFullView = urlParams.get('view') === 'full';
+        const urlZoom = urlParams.get('zoom') ? parseInt(urlParams.get('zoom')) : null;
+
+        // ─── API ────────────────────────────────────────────────────────
+        async function fetchData() {
+            try {
+                const [graphRes, statsRes, qRes] = await Promise.all([
+                    fetch('/api/graph'), fetch('/api/stats'), fetch('/api/quarantine')
+                ]);
+                return {
+                    graph: await graphRes.json(),
+                    stats: await statsRes.json(),
+                    quarantine: await qRes.json()
+                };
+            } catch (e) {
+                console.error('API fetch failed:', e);
+                return null;
+            }
+        }
+
+        // ─── Cluster Data Builder ───────────────────────────────────────
+        function buildClusterData() {
+            // Group nodes by layer
+            const layerGroups = {};
+            graphData.nodes.forEach(n => {
+                if (hiddenLayers.has(n.layer)) return;
+                if (activeScope !== 'all' && n.scope && n.scope !== activeScope) return;
+                const layer = n.layer || 'unknown';
+                if (!layerGroups[layer]) layerGroups[layer] = [];
+                layerGroups[layer].push(n);
+            });
+
+            // Create cluster nodes
+            const clusterNodes = [];
+            const layerIds = {};
+            Object.entries(layerGroups).forEach(([layer, nodes]) => {
+                const id = `cluster:${layer}`;
+                layerIds[layer] = id;
+                clusterNodes.push({
+                    id,
+                    name: `${layer.toUpperCase()}`,
+                    layer,
+                    isCluster: true,
+                    entityCount: nodes.length,
+                    val: 8 + Math.sqrt(nodes.length) * 3,
+                    connections: nodes.length
+                });
+            });
+
+            // Build inter-cluster links (count cross-layer edges)
+            const crossCounts = {};
+            graphData.links.forEach(l => {
+                const src = typeof l.source === 'object' ? l.source.id : l.source;
+                const tgt = typeof l.target === 'object' ? l.target.id : l.target;
+                const srcNode = graphData._nodeById[src];
+                const tgtNode = graphData._nodeById[tgt];
+                if (!srcNode || !tgtNode) return;
+                const srcLayer = srcNode.layer || 'unknown';
+                const tgtLayer = tgtNode.layer || 'unknown';
+                if (srcLayer === tgtLayer) return;
+                if (hiddenLayers.has(srcLayer) || hiddenLayers.has(tgtLayer)) return;
+                const key = [srcLayer, tgtLayer].sort().join('|');
+                crossCounts[key] = (crossCounts[key] || 0) + 1;
+            });
+
+            const clusterLinks = [];
+            Object.entries(crossCounts).forEach(([key, count]) => {
+                const [a, b] = key.split('|');
+                if (layerIds[a] && layerIds[b]) {
+                    clusterLinks.push({
+                        source: layerIds[a],
+                        target: layerIds[b],
+                        weight: count
+                    });
+                }
+            });
+
+            return { nodes: clusterNodes, links: clusterLinks };
+        }
+
+        // ─── Expanded Layer Data Builder ────────────────────────────────
+        function buildExpandedData(layer) {
+            const nodes = graphData.nodes.filter(n => {
+                if (n.layer !== layer) return false;
+                if (activeScope !== 'all' && n.scope && n.scope !== activeScope) return false;
+                return true;
+            });
+
+            // Compute connections for sizing
+            const nodeIds = new Set(nodes.map(n => n.id));
+            const links = graphData.links.filter(l => {
+                const src = typeof l.source === 'object' ? l.source.id : l.source;
+                const tgt = typeof l.target === 'object' ? l.target.id : l.target;
+                return nodeIds.has(src) && nodeIds.has(tgt);
+            });
+
+            const cc = {};
+            links.forEach(l => {
+                const s = typeof l.source === 'object' ? l.source.id : l.source;
+                const t = typeof l.target === 'object' ? l.target.id : l.target;
+                cc[s] = (cc[s] || 0) + 1;
+                cc[t] = (cc[t] || 0) + 1;
+            });
+            nodes.forEach(n => {
+                n.connections = cc[n.id] || 0;
+                n.val = 1 + Math.sqrt(n.connections) * 2;
+            });
+
+            return { nodes, links };
+        }
+
+        // ─── View Switching ─────────────────────────────────────────────
+        function showClusterView() {
+            viewMode = 'cluster';
+            expandedLayer = null;
+            document.getElementById('back-btn').style.display = 'none';
+
+            document.getElementById('view-info').textContent = 'CLUSTER VIEW — Click a layer to explore';
+            document.getElementById('view-toggle').classList.remove('active');
+            document.getElementById('view-toggle').textContent = '🧠 Full Brain View';
+            if (startInFullView) {
+                document.getElementById('crawler-panel').style.display = '';
+            }
+
+            const data = buildClusterData();
+            Graph.nodeThreeObject(node => {
+                if (!node.isCluster) return null;
+                const color = LAYER_COLORS[node.layer] || '#ffffff';
+                const group = new THREE.Group();
+
+                // Glowing outer sphere
+                const glowGeo = new THREE.SphereGeometry(6, 24, 24);
+                const glowMat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.35
+                });
+                const glow = new THREE.Mesh(glowGeo, glowMat);
+                glow.scale.setScalar(1 + Math.sqrt(node.entityCount) * 0.08);
+                group.add(glow);
+
+                // Inner solid sphere
+                const coreGeo = new THREE.SphereGeometry(3, 20, 20);
+                const coreMat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.95
+                });
+                const core = new THREE.Mesh(coreGeo, coreMat);
+                core.scale.setScalar(1 + Math.sqrt(node.entityCount) * 0.05);
+                group.add(core);
+
+                // Text label above
+                const sprite = new THREE.Sprite(
+                    new THREE.SpriteMaterial({
+                        map: makeTextSprite(
+                            `${node.name}\n${node.entityCount.toLocaleString()}`,
+                            color
+                        ),
+                        transparent: true,
+                        depthWrite: false
+                    })
+                );
+                sprite.scale.set(50, 25, 1);
+                sprite.position.y = 12 + Math.sqrt(node.entityCount) * 0.3;
+                group.add(sprite);
+
+                return group;
+            })
+                .nodeThreeObjectExtend(false)
+                .linkWidth(l => Math.min(0.5 + Math.log2(l.weight || 1) * 0.4, 4))
+                .linkColor(l => {
+                    const srcId = typeof l.source === 'object' ? l.source.id : l.source;
+                    const layer = srcId.replace('cluster:', '');
+                    return LAYER_COLORS[layer] || 'rgba(255,255,255,0.3)';
+                })
+                .linkOpacity(0.4)
+                .d3AlphaDecay(0.05)
+                .d3VelocityDecay(0.4)
+                .warmupTicks(60)
+                .cooldownTicks(150)
+                .graphData(data);
+            // Spread clusters apart
+            Graph.d3Force('charge').strength(-300);
+            Graph.d3Force('link').distance(150);
+            // Remove layer grouping force from full view
+            Graph.d3Force('layerGroup', null);
+        }
+
+        function showFullView() {
+            viewMode = 'full';
+            expandedLayer = null;
+            document.getElementById('back-btn').style.display = 'block';
+            document.getElementById('back-btn').textContent = '← Back to Cluster View';
+            document.getElementById('view-info').textContent = `FULL BRAIN VIEW — ${graphData.nodes.length.toLocaleString()} entities`;
+            document.getElementById('view-toggle').classList.add('active');
+            document.getElementById('view-toggle').textContent = '📊 Cluster View';
+
+            // In full mode from URL param, hide management UI
+            if (startInFullView) {
+                document.getElementById('crawler-panel').style.display = 'none';
+            }
+
+            const nodes = graphData.nodes.filter(n => {
+                if (hiddenLayers.has(n.layer)) return false;
+                if (activeScope !== 'all' && n.scope && n.scope !== activeScope) return false;
+                return true;
+            });
+            const nodeIds = new Set(nodes.map(n => n.id));
+            const links = graphData.links.filter(l => {
+                const src = typeof l.source === 'object' ? l.source.id : l.source;
+                const tgt = typeof l.target === 'object' ? l.target.id : l.target;
+                return nodeIds.has(src) && nodeIds.has(tgt);
+            });
+
+            // Compute connection counts and hub scaling
+            const cc = {};
+            links.forEach(l => {
+                const s = typeof l.source === 'object' ? l.source.id : l.source;
+                const t = typeof l.target === 'object' ? l.target.id : l.target;
+                cc[s] = (cc[s] || 0) + 1;
+                cc[t] = (cc[t] || 0) + 1;
+            });
+            nodes.forEach(n => {
+                n.connections = cc[n.id] || 0;
+                // Hub scaling: highly connected nodes are larger
+                n.val = 1.5 + Math.sqrt(n.connections) * 2.5;
+            });
+
+            const nodeCount = nodes.length;
+            const isLarge = nodeCount > 3000;
+            const isMassive = nodeCount > 10000;
+
+            // ── Layer positions: arrange layers in a sphere for spatial grouping ──
+            const uniqueLayers = [...new Set(nodes.map(n => n.layer || 'unknown'))];
+            const layerPositions = {};
+            const spread = isLarge ? 800 : 400;  // How far apart layer clusters are
+            uniqueLayers.forEach((layer, i) => {
+                // Fibonacci sphere distribution for even spacing
+                const phi = Math.acos(1 - 2 * (i + 0.5) / uniqueLayers.length);
+                const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+                layerPositions[layer] = {
+                    x: spread * Math.sin(phi) * Math.cos(theta),
+                    y: spread * Math.sin(phi) * Math.sin(theta),
+                    z: spread * Math.cos(phi)
+                };
+            });
+
+            // Build a fast node-layer lookup for link coloring
+            const nodeLayerMap = {};
+            nodes.forEach(n => nodeLayerMap[n.id] = n.layer || 'unknown');
+
+            Graph.nodeThreeObject(null)
+                .nodeThreeObjectExtend(false)
+                // Color links by source node's layer
+                .linkColor(l => {
+                    const srcId = typeof l.source === 'object' ? l.source.id : l.source;
+                    const layer = nodeLayerMap[srcId] || 'system';
+                    return LAYER_COLORS[layer] || 'rgba(255, 255, 255, 0.4)';
+                })
+                .linkWidth(isLarge ? 0.4 : 0.8)
+                .linkOpacity(isLarge ? 0.25 : 0.5)
+                .d3AlphaDecay(isLarge ? 0.04 : 0.02)
+                .d3VelocityDecay(isLarge ? 0.45 : 0.3)
+                .warmupTicks(isMassive ? 40 : (isLarge ? 50 : 80))
+                .cooldownTicks(isMassive ? 100 : 200)
+                .graphData({ nodes, links });
+
+            // ── Layer-grouping force: pulls nodes toward their layer center ──
+            const groupingStrength = isLarge ? 0.06 : 0.04;
+            Graph.d3Force('layerGroup', (alpha) => {
+                nodes.forEach(n => {
+                    const target = layerPositions[n.layer || 'unknown'];
+                    if (!target) return;
+                    n.vx += (target.x - n.x) * groupingStrength * alpha;
+                    n.vy += (target.y - n.y) * groupingStrength * alpha;
+                    n.vz += (target.z - n.z) * groupingStrength * alpha;
+                });
+            });
+
+            // Tune charge to keep nodes from overlapping within clusters
+            Graph.d3Force('charge').strength(isLarge ? -30 : -60);
+            Graph.d3Force('link').distance(isLarge ? 30 : 50);
+
+            // Zoom out so they can see the full brain
+            const zoomDist = urlZoom || (isLarge ? 3000 : 1500);
+            setTimeout(() => {
+                Graph.cameraPosition({ x: 0, y: 0, z: zoomDist }, { x: 0, y: 0, z: 0 }, 1500);
+            }, 300);
+        }
+
+        function toggleFullView() {
+            if (viewMode === 'full') {
+                showClusterView();
+            } else {
+                showFullView();
+            }
+        }
+
+        function expandLayer(layer) {
+            viewMode = 'expanded';
+            expandedLayer = layer;
+            document.getElementById('back-btn').style.display = 'block';
+            document.getElementById('back-btn').textContent = '← Back to Cluster View';
+            const color = LAYER_COLORS[layer] || '#fff';
+            document.getElementById('view-info').innerHTML =
+                `<span style="color:${color}">● ${layer.toUpperCase()}</span> LAYER — ${graphData.nodes.filter(n => n.layer === layer).length.toLocaleString()} entities`;
+
+            const data = buildExpandedData(layer);
+            const nodeCount = data.nodes.length;
+            const isLarge = nodeCount > 500;
+
+            Graph.nodeThreeObject(null)
+                .nodeThreeObjectExtend(false)
+                .linkWidth(isLarge ? 0.4 : 0.7)
+                .linkColor(() => color + '99')  // Layer color with alpha
+                .linkOpacity(isLarge ? 0.3 : 0.5)
+                .d3AlphaDecay(isLarge ? 0.04 : 0.03)
+                .d3VelocityDecay(isLarge ? 0.4 : 0.3)
+                .warmupTicks(isLarge ? 40 : 60)
+                .cooldownTicks(isLarge ? 120 : 200)
+                .graphData(data);
+
+            // Better charge for within-layer exploration
+            Graph.d3Force('charge').strength(isLarge ? -40 : -80);
+            Graph.d3Force('link').distance(isLarge ? 20 : 40);
+            // Remove layer grouping force if it exists from full view
+            Graph.d3Force('layerGroup', null);
+        }
+
+        // ─── Text Sprite Generator ──────────────────────────────────────
+        function makeTextSprite(text, color) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+
+            const lines = text.split('\n');
+
+            // Layer name
+            ctx.font = 'bold 48px Inter, sans-serif';
+            ctx.fillStyle = color;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(lines[0], 256, lines.length > 1 ? 100 : 128);
+
+            // Entity count
+            if (lines[1]) {
+                ctx.font = '36px Inter, sans-serif';
+                ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                ctx.fillText(lines[1], 256, 160);
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+            return texture;
+        }
+
+        function updateGraph() {
+            if (!Graph) return;
+            if (viewMode === 'full') showFullView();
+            else if (viewMode === 'cluster') showClusterView();
+            else if (expandedLayer) expandLayer(expandedLayer);
+        }
+
+        function buildLegend() {
+            const grid = document.getElementById('legend-grid');
+            grid.innerHTML = '';
+            Object.entries(LAYER_COLORS).forEach(([layer, color]) => {
+                const item = document.createElement('div');
+                item.className = 'legend-item';
+                if (hiddenLayers.has(layer)) item.classList.add('dimmed');
+                item.dataset.layer = layer;
+                item.innerHTML = `<div class="legend-dot" style="background:${color}"></div>${layer}`;
+                item.addEventListener('click', () => {
+                    if (hiddenLayers.has(layer)) {
+                        hiddenLayers.delete(layer);
+                        item.classList.remove('dimmed');
+                    } else {
+                        hiddenLayers.add(layer);
+                        item.classList.add('dimmed');
+                    }
+                    updateGraph();
+                });
+                grid.appendChild(item);
+            });
+        }
+
+        function selectAllLayers() {
+            hiddenLayers.clear();
+            document.querySelectorAll('.legend-item').forEach(el => el.classList.remove('dimmed'));
+            updateGraph();
+        }
+
+        function deselectAllLayers() {
+            Object.keys(LAYER_COLORS).forEach(layer => hiddenLayers.add(layer));
+            document.querySelectorAll('.legend-item').forEach(el => el.classList.add('dimmed'));
+            updateGraph();
+        }
+
+        function updateHUD(stats, quarantine) {
+            document.getElementById('s-nodes').textContent = (stats.total_nodes || 0).toLocaleString();
+            document.getElementById('s-edges').textContent = (stats.total_edges || 0).toLocaleString();
+            document.getElementById('s-layers').textContent = stats.active_layers || 0;
+            document.getElementById('s-quarantine').textContent = quarantine.count || 0;
+            document.getElementById('s-orphaned').textContent = stats.orphaned_nodes || 0;
+            const health = stats.health_score != null ? (stats.health_score * 100).toFixed(0) + '%' : '—';
+            document.getElementById('s-health').textContent = health;
+            if (quarantine.count > 0) {
+                document.getElementById('q-badge').style.display = 'block';
+                document.getElementById('q-count').textContent = quarantine.count;
+            }
+        }
+
+        // ─── Tooltip ────────────────────────────────────────────────────
+        const tooltip = document.getElementById('tooltip');
+        function showTooltip(node, event) {
+            if (node.isCluster) {
+                tooltip.querySelector('.tt-name').textContent = node.name;
+                tooltip.querySelector('.tt-layer').textContent = 'LAYER CLUSTER';
+                tooltip.querySelector('.tt-props').innerHTML =
+                    `Entities: ${node.entityCount.toLocaleString()}<br>Click to expand`;
+            } else {
+                tooltip.querySelector('.tt-name').textContent = node.name || node.id;
+                tooltip.querySelector('.tt-layer').textContent = (node.layer || 'unknown').toUpperCase();
+                let html = '';
+                if (node.scope) html += `Scope: ${node.scope}<br>`;
+                if (node.connections) html += `Connections: ${node.connections}<br>`;
+                tooltip.querySelector('.tt-props').innerHTML = html;
+            }
+            tooltip.style.display = 'block';
+            tooltip.style.left = (event.clientX + 14) + 'px';
+            tooltip.style.top = (event.clientY + 14) + 'px';
+        }
+        function hideTooltip() { tooltip.style.display = 'none'; }
+
+        // ─── Init ───────────────────────────────────────────────────────
+        async function init() {
+            buildLegend();
+
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    activeScope = btn.dataset.scope;
+                    updateGraph();
+                });
+            });
+
+            const data = await fetchData();
+            if (!data) {
+                document.querySelector('.loading-text').textContent = 'FAILED TO LOAD — CHECK SERVER';
+                return;
+            }
+
+            graphData = data.graph;
+            updateHUD(data.stats, data.quarantine);
+
+            // Pre-index nodes by ID for fast lookup in cluster building
+            graphData._nodeById = {};
+            graphData.nodes.forEach(n => graphData._nodeById[n.id] = n);
+
+            // Create graph instance
+            Graph = ForceGraph3D()(document.getElementById('graph-container'))
+                .backgroundColor('#0a0a0f')
+                .nodeLabel('')
+                .nodeColor(n => {
+                    if (n.quarantined) return '#ff4444';
+                    return LAYER_COLORS[n.layer] || '#666';
+                })
+                .nodeOpacity(0.9)
+                .nodeVal(n => n.val || 2)
+                .linkDirectionalParticles(0)
+                .onNodeHover((node, prevNode) => {
+                    document.body.style.cursor = node ? 'pointer' : 'default';
+                    if (!node) hideTooltip();
+                })
+                .onNodeClick(node => {
+                    if (node.isCluster) {
+                        // Expand this cluster
+                        expandLayer(node.layer);
+                    } else {
+                        // Zoom to node
+                        const distance = 80;
+                        const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+                        Graph.cameraPosition(
+                            { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+                            node, 1500
+                        );
+                    }
+                });
+
+            // Track mouse for tooltip
+            let mouseX = 0, mouseY = 0;
+            document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+
+            Graph.onNodeHover((node, prev) => {
+                if (node) showTooltip(node, { clientX: mouseX, clientY: mouseY });
+                else hideTooltip();
+            });
+
+            // Start in the right view mode
+            if (startInFullView) {
+                showFullView();
+            } else {
+                showClusterView();
+            }
+
+            document.getElementById('loading').style.display = 'none';
+
+            // Crawler UI
+            updateCrawlerStatus();
+            setInterval(updateCrawlerStatus, 15000);
+
+            // Auto-refresh every 60s (slower since cluster view is lightweight)
+            setInterval(async () => {
+                const newData = await fetchData();
+                if (newData) {
+                    graphData = newData.graph;
+                    graphData._nodeById = {};
+                    graphData.nodes.forEach(n => graphData._nodeById[n.id] = n);
+                    updateHUD(newData.stats, newData.quarantine);
+                    // Only auto-update if in cluster view (don't disrupt expanded exploration)
+                    if (viewMode === 'cluster') showClusterView();
+                }
+            }, 60000);
+        }
+
+        // ── Crawler API ──────────────────────────────────────────────────
+        async function updateCrawlerStatus() {
+            try {
+                const res = await fetch('/api/crawler/status');
+                const data = await res.json();
+                const el = document.getElementById('crawler-status');
+                const stats = data.stats || {};
+                document.getElementById('cr-facts').textContent = (stats.total_facts_ingested || 0).toLocaleString();
+                document.getElementById('cr-cycles').textContent = stats.total_crawl_cycles || 0;
+                document.getElementById('cr-urls').textContent = (data.visited_urls || 0).toLocaleString();
+
+                const sources = data.sources || {};
+                let html = '';
+                for (const [name, info] of Object.entries(sources)) {
+                    const cls = info.is_due ? 'due' : 'waiting';
+                    const label = info.is_due ? '● DUE' : `${info.due_in_minutes}m`;
+                    html += `<span class="source-tag ${cls}">${name}: ${label}</span> `;
+                }
+                document.getElementById('cr-sources').innerHTML = html;
+                el.textContent = 'Crawler Ready';
+                el.className = 'crawler-status active';
+            } catch (e) {
+                document.getElementById('crawler-status').textContent = 'Crawler Offline';
+                document.getElementById('crawler-status').className = 'crawler-status idle';
+            }
+        }
+
+        async function crawlForce(source) {
+            const btn = event.target;
+            const origText = btn.textContent;
+            btn.textContent = '⏳...';
+            btn.disabled = true;
+            try {
+                const url = source ? `/api/crawler/run?source=${source}` : '/api/crawler/run';
+                const res = await fetch(url, { method: 'POST' });
+                const data = await res.json();
+                btn.textContent = `✓ ${data.new || 0} facts`;
+                setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 3000);
+                updateCrawlerStatus();
+                setTimeout(refreshGraph, 1000);
+            } catch (e) {
+                btn.textContent = '✗ Error';
+                setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 3000);
+            }
+        }
+
+        async function refreshGraph() {
+            const data = await fetchData();
+            if (data) {
+                graphData = data.graph;
+                graphData._nodeById = {};
+                graphData.nodes.forEach(n => graphData._nodeById[n.id] = n);
+                updateHUD(data.stats, data.quarantine);
+                if (viewMode === 'cluster') showClusterView();
+                else if (expandedLayer) expandLayer(expandedLayer);
+            }
+        }
+
+        init();
+    </script>
+</body>
+
+</html>

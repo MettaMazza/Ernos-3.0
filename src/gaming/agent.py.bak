@@ -1,0 +1,944 @@
+"""
+Gaming Agent - Autonomous Minecraft player with Predictive Chain architecture.
+
+Uses unified Ernos brain (CognitionEngine) for decisions.
+Delegates all game actions to Mineflayer via bridge.
+
+Orchestrator module — perception, cognition, and actions are in separate shard modules.
+"""
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+from .mineflayer_bridge import MineflayerBridge
+from .planner import HierarchicalPlanner, plan_goal
+from .skill_library import get_skill_library
+from src.core.data_paths import data_dir
+
+logger = logging.getLogger("Gaming.Agent")
+
+from .utils import mc_logger, mc_log, log_embodiment, get_discord_id_for_mc_user, GAME_ACTIONS_ADDON
+
+
+# Import shard mixins AFTER module-level functions are defined (they import mc_log/log_embodiment)
+from .perception import PerceptionMixin
+from .cognition_gaming import CognitionMixin
+from .actions import ActionsMixin
+
+
+class GamingAgent(PerceptionMixin, CognitionMixin, ActionsMixin):
+    """
+    Orchestrates gaming sessions with predictive chain architecture.
+    
+    - Connects to Minecraft via MineflayerBridge
+    - Uses main Ernos CognitionEngine for decisions
+    - Runs reflexes during inference for continuous gameplay
+    
+    Perception, cognition, and action dispatch are in separate shard modules.
+    """
+    
+    def __init__(self, bot):
+        """
+        Args:
+            bot: ErnosBot instance (for CognitionEngine access)
+        """
+        self.bot = bot
+        self.game_name = None
+        self.channel = None
+        self.bridge = None
+        self.is_running = False
+        self._loop_task = None
+        self._pending_chats: List[Dict] = []
+        self._current_goal = None
+        self._following_player = None
+        self._follow_dismissed_until = 0  # Timestamp: block follow re-set until this time
+        self._tunnel_process = None
+        self._planner = HierarchicalPlanner()
+        self._action_queue: List[str] = []
+        self._goal_start_time = None
+        self._goal_actions = []
+        # Phase 5: Stuck Detection
+        self._last_position = None
+        self._stuck_counter = 0
+        self._action_timeout = 30
+        # Phase 6: Consecutive Failure Detection
+        self._consecutive_fail_action = None
+        self._consecutive_fail_count = 0
+        # Phase 7: LLM-Directed Precognition Queue
+        self._precognition_queue: List[Dict] = []
+        # Phase 8: Discovery Tracking for Novelty Curriculum
+        self._discovered_items: set = set()
+        # Phase 9: Failure Memory for Reflection Loop Prevention
+        self._recent_failures: List[str] = []
+        self._follow_fail_count = 0
+    
+    async def start(
+        self,
+        game_name: str,
+        channel,
+        host: str = "localhost",
+        port: int = 25565
+    ) -> bool:
+        """Start a gaming session."""
+        if self.is_running:
+            return False
+        
+        self.game_name = game_name
+        self.channel = channel
+        
+        if hasattr(self.bot, 'cognition') and self.bot.cognition:
+            mc_log("INFO", "USING_UNIFIED_COGNITION")
+        else:
+            mc_log("WARNING", "NO_UNIFIED_COGNITION", msg="Bot.cognition not available")
+        
+        if game_name.lower() == "minecraft":
+            self.bridge = MineflayerBridge(
+                host=host,
+                port=port,
+                username="Ernos",
+                on_event=self._handle_event
+            )
+            
+            success = await self.bridge.connect()
+            if success:
+                self.is_running = True
+                self._loop_task = asyncio.create_task(self._game_loop())
+                
+                # Start Tailscale tunnel for public access
+                try:
+                    import subprocess
+                    import shutil
+                    ts_path = shutil.which("tailscale")
+                    if ts_path:
+                        self._tunnel_process = subprocess.Popen(
+                            [ts_path, "funnel", "--tcp", "25565", "25565"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        mc_log("INFO", "TAILSCALE_TUNNEL_STARTED", port=port)
+                    else:
+                        mc_log("INFO", "TAILSCALE_SKIP", reason="binary_not_found")
+                except Exception as e:
+                    mc_log("WARNING", "TAILSCALE_TUNNEL_FAILED", error=str(e))
+                
+                log_embodiment("session_start", f"I started playing Minecraft on {host}:{port}")
+                await self._notify("🎮 Connected to Minecraft! I'm playing autonomously now.")
+                return True
+            else:
+                await self._notify("❌ Failed to connect to Minecraft server.")
+                return False
+        else:
+            await self._notify(f"❌ Unknown game: {game_name}")
+            return False
+    
+    async def stop(self):
+        """Stop the gaming session."""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        
+        if self._loop_task:
+            self._loop_task.cancel()
+        
+        if self.bridge:
+            await self.bridge.disconnect()
+            self.bridge = None
+        
+        # Stop Tailscale tunnel
+        if self._tunnel_process:
+            try:
+                self._tunnel_process.terminate()
+                self._tunnel_process.wait(timeout=5)
+                mc_log("INFO", "TAILSCALE_TUNNEL_STOPPED")
+            except Exception as e:
+                mc_log("WARNING", "TAILSCALE_TUNNEL_STOP_FAILED", error=str(e))
+            self._tunnel_process = None
+        
+        mc_log("INFO", "GAMING_SESSION_ENDED", game=self.game_name)
+        log_embodiment("session_end", "I stopped playing Minecraft")
+        await self._notify("🛑 Gaming session ended.")
+    
+    # === PREDICTIVE CHAIN GAME LOOP ===
+    
+    async def _game_loop(self):
+        """Main game loop with predictive chain architecture."""
+        logger.info("Game loop started")
+        mc_log("INFO", "GAME_LOOP_STARTED")
+        loop_count = 0
+        
+        while self.is_running:
+            loop_count += 1
+            mc_log("DEBUG", f"LOOP_CYCLE_START", iteration=loop_count)
+            
+            # HEARTBEAT CHECK: Detect dead bridge process early
+            if not self.bridge.is_connected:
+                mc_log("CRITICAL", "BRIDGE_DISCONNECTED", 
+                       reason="Bridge process died or disconnected",
+                       iteration=loop_count)
+                logger.critical(f"GAME_LOOP_ABORT: Mineflayer bridge process is dead! Stopping loop after {loop_count} iterations.")
+                self.is_running = False
+                
+                if self.channel:
+                    try:
+                        await self.channel.send("⚠️ **Minecraft session ended** - Lost connection to game. Use `/game join` to reconnect.")
+                    except Exception as e:
+                        logger.warning(f"Suppressed {type(e).__name__}: {e}")
+                break
+            
+            try:
+                # 1. OBSERVE
+                mc_log("DEBUG", "OBSERVE_START")
+                state = await self._observe()
+                mc_log("DEBUG", "OBSERVE_COMPLETE", 
+                       health=state.get('health'), 
+                       food=state.get('food'),
+                       pos=str(state.get('position', {})),
+                       has_screenshot=bool(state.get('screenshot')))
+                
+                # 1.3 DEATH DETECTION — reset state (JS autonomy handles escape sprint)
+                if state.get("health", 20) <= 0:
+                    mc_log("WARNING", "DEATH_DETECTED", goal=self._current_goal)
+                    log_embodiment("death", f"I died! Was working on: {self._current_goal or 'exploring'}")
+                    
+                    if self._current_goal:
+                        skill_lib = get_skill_library()
+                        skill_lib.record_failure(self._current_goal)
+                    
+                    # Full state reset
+                    self._current_goal = None
+                    self._action_queue.clear()
+                    self._following_player = None
+                    self._stuck_counter = 0
+                    self._consecutive_fail_count = 0
+                    self._consecutive_fail_action = None
+                    self._precognition_queue.clear()
+                    self._recent_failures.clear()
+                    self._follow_fail_count = 0
+                    
+                    # Wait for JS autonomy death escape to complete
+                    await asyncio.sleep(6)
+                    continue
+                
+                # 1.5 COMBAT — handled by JS combat.js (auto-defend, flee, creeper evasion)
+                # Python only logs that hostiles are nearby for LLM awareness
+                if state.get("hostiles_nearby") and state.get("health", 20) > 0:
+                    mc_log("DEBUG", "HOSTILES_NEARBY_JS_HANDLING", health=state.get("health"))
+                
+                # 1.6 SURVIVAL INTERRUPT
+                if state.get("food", 20) <= 3 and state.get("health", 20) > 0:
+                    if not hasattr(self, '_survival_attack_count'):
+                        self._survival_attack_count = 0
+                    
+                    nearby = state.get("nearby_entities", [])
+                    food_mobs = [e for e in nearby if e.get("name") in ("pig", "cow", "sheep", "chicken")]
+                    if food_mobs and self._survival_attack_count < 2:
+                        mc_log("WARNING", "SURVIVAL_INTERRUPT", reason="starvation", food=state.get("food"), attempt=self._survival_attack_count + 1)
+                        log_embodiment("survival", f"I'm starving (food={state.get('food')})! Killing {food_mobs[0]['name']} for food.")
+                        await self._act(f"attack {food_mobs[0]['name']}")
+                        self._survival_attack_count += 1
+                        # Try eating immediately after attack (mob may have dropped food)
+                        await self._act("eat")
+                        await asyncio.sleep(0.5)
+                        continue
+                    elif food_mobs and self._survival_attack_count >= 2:
+                        # Break out of food attack loop — let THINK decide what to do
+                        mc_log("WARNING", "SURVIVAL_LOOP_BREAK", reason="2+ food attacks without eating", count=self._survival_attack_count)
+                        self._survival_attack_count = 0
+                        # Fall through to THINK
+                    elif not hasattr(self, '_last_food_search') or (asyncio.get_event_loop().time() - self._last_food_search) > 30.0:
+                        self._last_food_search = asyncio.get_event_loop().time()
+                        mc_log("WARNING", "SURVIVAL_HUNT", reason="starvation_no_mobs", food=state.get("food"))
+                        log_embodiment("survival", "I'm starving! Searching for animals...")
+                        await self._act("find pig go")
+                        # No sleep — find already navigates; fall through to THINK
+                
+                # ══════════════════════════════════════════════════════════════
+                # 2. PARALLEL LLM + PRECOG CHAINING
+                # LLM thinks in background while bot chains precog actions.
+                # Bot NEVER stops moving — precog fills the gap.
+                # ══════════════════════════════════════════════════════════════
+                
+                action_decision = None
+                precognition_list = []
+                
+                # Start LLM inference in background
+                mc_log("DEBUG", "THINK_START")
+                import time as _time
+                if not hasattr(self, '_last_llm_time'):
+                    self._last_llm_time = 0
+                
+                llm_task = None
+                now = _time.time()
+                needs_fresh_llm = (
+                    self._pending_chats  # Player said something — must respond
+                    or state.get("health", 20) < 6  # Low health — need fresh strategy
+                    or not self._precognition_queue  # No precog to chain
+                    or now - self._last_llm_time >= 3.0  # Rate limit
+                )
+                
+                # Track if this LLM call was triggered by user chat
+                _llm_had_chats = bool(self._pending_chats)
+                if _llm_had_chats:
+                    self._chat_replied = False  # New user message → allow one chat reply
+                # Snapshot how many chats the LLM will see — new chats arriving
+                # during the call should NOT be cleared
+                _llm_chat_count = len(self._pending_chats)
+                
+                if needs_fresh_llm and now - self._last_llm_time >= 3.0:
+                    self._last_llm_time = now
+                    llm_task = asyncio.create_task(self._think(state))
+                
+                # 3. CHAIN PRECOG ACTIONS (tight loop — no observe between)
+                chain_count = 0
+                max_chain = 10  # Cap to prevent super-speed / modded appearance
+                while self._precognition_queue and self.is_running and chain_count < max_chain:
+                    # Bail if bridge disconnected
+                    if self.bridge and not self.bridge.is_connected:
+                        mc_log("WARNING", "PRECOG_CHAIN_BRIDGE_DISCONNECTED")
+                        break
+                    # Dequeue next real action (skip reflex-only commands)
+                    next_precog = self._precognition_queue.pop(0)
+                    precog_action = next_precog.get("params", {}).get("action", "")
+                    
+                    while not precog_action and self._precognition_queue:
+                        next_precog = self._precognition_queue.pop(0)
+                        precog_action = next_precog.get("params", {}).get("action", "")
+                    
+                    if not precog_action:
+                        break  # Queue exhausted of real actions
+                    
+                    mc_log("INFO", "PRECOG_CHAIN_ACTION", action=precog_action, remaining=len(self._precognition_queue), chain_idx=chain_count)
+                    
+                    # Skip redundant follow actions when already following — don't waste chain slots
+                    if precog_action.lower().startswith("follow ") and self._following_player:
+                        _follow_target = precog_action.split(None, 1)[1] if len(precog_action.split()) > 1 else None
+                        if _follow_target and _follow_target == self._following_player:
+                            mc_log("DEBUG", "PRECOG_FOLLOW_SKIPPED", player=_follow_target)
+                            continue  # Skip without incrementing chain_count
+                    
+                    # Execute action directly — no observe overhead
+                    result = await self._act(precog_action)
+                    chain_count += 1
+                    
+                    # If action failed, abort chain to force re-observation
+                    if result and not result.success:
+                        mc_log("WARNING", "PRECOG_CHAIN_ABORTED", action=precog_action, error=result.error)
+                        break
+                    
+                    # Lightweight safety check every 3rd action (health/hostiles only)
+                    if chain_count % 3 == 0:
+                        try:
+                            quick_status = await self.bridge.get_status()
+                            if quick_status.success:
+                                qh = quick_status.data.get("health", 20)
+                                qf = quick_status.data.get("food", 20)
+                                mc_log("DEBUG", "PRECOG_SAFETY_CHECK", health=qh, food=qf, chain_idx=chain_count)
+                                if qh <= 0:
+                                    mc_log("WARNING", "PRECOG_DEATH_DETECTED")
+                                    break  # Death — exit chain, main loop will handle
+                                if qh < 6:
+                                    mc_log("WARNING", "PRECOG_LOW_HEALTH", health=qh)
+                                    break  # Low health — exit chain for fresh strategy
+                        except Exception:
+                            pass  # Non-critical — keep chaining
+                    
+                    # If LLM finished while chaining, prepend new actions
+                    if llm_task and llm_task.done():
+                        try:
+                            decision_tuple = llm_task.result()
+                            if not decision_tuple or len(decision_tuple) < 2:
+                                mc_log("WARNING", "LLM_EMPTY_RESULT_DURING_CHAIN")
+                                llm_task = None
+                                continue
+                            action_list, precognition_list = decision_tuple
+                            action_decision = action_list[0] if action_list else None
+                            extra_actions = action_list[1:] if len(action_list) > 1 else []
+                            mc_log("INFO", "LLM_INJECTED_DURING_CHAIN", decision=action_decision, extra=len(extra_actions), precog_count=len(precognition_list), chain_idx=chain_count)
+                            await self.bridge.execute("stop_predictive_chain")
+                            
+                            # Only clear chats the LLM actually saw — preserve new ones
+                            _seen_chats = self._pending_chats[:_llm_chat_count]  # snapshot before deleting
+                            del self._pending_chats[:_llm_chat_count]
+                            state['pending_chats'] = list(self._pending_chats)
+                            
+                            # Auto-dismiss follow when user explicitly requested a task action.
+                            # Check ALL chats — both consumed ones (_seen_chats) and ones that
+                            # arrived during the LLM call (still in _pending_chats).
+                            _TASK_KEYWORDS = {"collect", "gather", "mine", "get", "find", "harvest",
+                                              "farm", "build", "craft", "flowers", "flower",
+                                              "pick", "chop", "dig", "break", "grab"}
+                            _follow_dismissed = False
+                            if self._following_player:
+                                for _chat in list(_seen_chats) + list(self._pending_chats):
+                                    _words = set(_chat.get('message', '').lower().split())
+                                    if _words & _TASK_KEYWORDS:
+                                        mc_log("INFO", "FOLLOW_AUTO_DISMISSED_FOR_TASK",
+                                               player=self._following_player,
+                                               chat=_chat.get('message', '')[:60])
+                                        self._following_player = None
+                                        self._follow_dismissed_until = _time.time() + 60  # 60s cooldown
+                                        _follow_dismissed = True
+                                        break
+                            
+                            # Pre-set follow OR strip follow depending on task-intent chats
+                            # Check if any pending chat has task keywords — if so, never enable follow
+                            _has_task_chat = False
+                            if not _follow_dismissed:
+                                print(f"DEBUG CHATS: {_seen_chats} + {self._pending_chats}")
+                                for _chat in list(_seen_chats) + list(self._pending_chats):
+                                    _words = set(_chat.get('message', '').lower().split())
+                                    print(f"DEBUG WORDS: {_words}")
+                                    if _words & _TASK_KEYWORDS:
+                                        _has_task_chat = True
+                                        break
+                            if _follow_dismissed or _has_task_chat:
+                                # Strip follow commands so _act_follow can't re-set _following_player
+                                extra_actions = [a for a in extra_actions if not (a and a.lower().startswith("follow "))]
+                                if action_decision and action_decision.lower().startswith("follow "):
+                                    action_decision = extra_actions.pop(0) if extra_actions else "explore"
+                                    mc_log("DEBUG", "FOLLOW_STRIPPED_FROM_CHAIN", new_primary=action_decision)
+                            else:
+                                all_actions = ([action_decision] if action_decision else []) + extra_actions
+                                for _a in all_actions:
+                                    if _a and _a.lower().startswith("follow "):
+                                        _follow_target = _a.split(None, 1)[1] if len(_a.split()) > 1 else None
+                                        if _follow_target and _time.time() > self._follow_dismissed_until:
+                                            self._following_player = _follow_target
+                                            mc_log("DEBUG", "FOLLOW_PRE_SET_FOR_CHAIN", player=_follow_target)
+                                        elif _follow_target:
+                                            mc_log("DEBUG", "FOLLOW_BLOCKED_BY_COOLDOWN", player=_follow_target)
+                                        break
+                            
+                            # Build chain: extra actions + precog, all through follow filter
+                            new_chain = self._precognition_to_chain(extra_actions + precognition_list, state)
+                            if action_decision:
+                                # Insert the LLM's primary action at the front (unfiltered)
+                                new_chain.insert(0, {"command": "precog_action", "params": {"action": action_decision}})
+                            self._precognition_queue = new_chain  # Replace, don't append
+                            llm_task = None  # Consumed
+                            
+                            # Start next LLM cycle immediately (reuse existing state — no stall)
+                            self._last_llm_time = _time.time()
+                            llm_task = asyncio.create_task(self._think(state))
+                        except Exception as e:
+                            import traceback
+                            traceback.print_exc()
+                            mc_log("WARNING", "LLM_INJECT_FAILED", error=str(e))
+                            llm_task = None
+                    
+                    await asyncio.sleep(1.5)  # Paced execution — prevents super-speed appearance
+                
+                mc_log("DEBUG", "PRECOG_CHAIN_DONE", total_chained=chain_count)
+                
+                # 4. If precog exhausted, wait for or trigger LLM
+                if llm_task and not llm_task.done():
+                    # While waiting for LLM, don't override active navigation goals
+                    if self._following_player:
+                        mc_log("DEBUG", "WAITING_FOR_LLM_WHILE_FOLLOWING")
+                    else:
+                        mc_log("DEBUG", "EXPLORE_WHILE_WAITING_FOR_LLM")
+                        await self._act("explore")
+                    
+                    # Wait for LLM (with timeout)
+                    try:
+                        decision_tuple = await asyncio.wait_for(asyncio.shield(llm_task), timeout=30.0)
+                        if not decision_tuple or len(decision_tuple) < 2:
+                            raise ValueError("LLM returned empty result")
+                        action_list, precognition_list = decision_tuple
+                        action_decision = action_list[0] if action_list else "explore"
+                        extra_actions = action_list[1:] if len(action_list) > 1 else []
+                        mc_log("INFO", "THINK_COMPLETE", decision=action_decision, extra=len(extra_actions), precog_count=len(precognition_list))
+                        await self.bridge.execute("stop_predictive_chain")
+                        _seen_chats = self._pending_chats[:_llm_chat_count]  # snapshot before deleting
+                        del self._pending_chats[:_llm_chat_count]
+                        state['pending_chats'] = list(self._pending_chats)
+                        # Auto-dismiss follow when user explicitly requested a task action.
+                        _TASK_KEYWORDS = {"collect", "gather", "mine", "get", "find", "harvest",
+                                          "farm", "build", "craft", "flowers", "flower",
+                                          "pick", "chop", "dig", "break", "grab"}
+                        _follow_dismissed = False
+                        if self._following_player:
+                            for _chat in list(_seen_chats) + list(self._pending_chats):
+                                _words = set(_chat.get('message', '').lower().split())
+                                if _words & _TASK_KEYWORDS:
+                                    mc_log("INFO", "FOLLOW_AUTO_DISMISSED_FOR_TASK",
+                                           player=self._following_player,
+                                           chat=_chat.get('message', '')[:60])
+                                    self._following_player = None
+                                    self._follow_dismissed_until = _time.time() + 60  # 60s cooldown
+                                    _follow_dismissed = True
+                                    break
+                        # Pre-set follow OR strip follow depending on task-intent chats
+                        _has_task_chat = False
+                        if not _follow_dismissed:
+                            for _chat in list(_seen_chats) + list(self._pending_chats):
+                                _words = set(_chat.get('message', '').lower().split())
+                                if _words & _TASK_KEYWORDS:
+                                    _has_task_chat = True
+                                    break
+                        if _follow_dismissed or _has_task_chat:
+                            extra_actions = [a for a in extra_actions if not (a and a.lower().startswith("follow "))]
+                            if action_decision and action_decision.lower().startswith("follow "):
+                                action_decision = extra_actions.pop(0) if extra_actions else "explore"
+                                mc_log("DEBUG", "FOLLOW_STRIPPED_FROM_CHAIN", new_primary=action_decision)
+                        else:
+                            all_actions = ([action_decision] if action_decision else []) + extra_actions
+                            for _a in all_actions:
+                                if _a and _a.lower().startswith("follow "):
+                                    _follow_target = _a.split(None, 1)[1] if len(_a.split()) > 1 else None
+                                    if _follow_target and _time.time() > self._follow_dismissed_until:
+                                        self._following_player = _follow_target
+                                        mc_log("DEBUG", "FOLLOW_PRE_SET_FOR_CHAIN", player=_follow_target)
+                                    elif _follow_target:
+                                        mc_log("DEBUG", "FOLLOW_BLOCKED_BY_COOLDOWN", player=_follow_target)
+                                    break
+                        # Extra actions + precog all go through follow filter
+                        self._precognition_queue = self._precognition_to_chain(extra_actions + precognition_list, state)
+                    except asyncio.TimeoutError:
+                        mc_log("WARNING", "LLM_TIMEOUT_30S")
+                        action_decision = f"follow {self._following_player}" if self._following_player else None
+                        llm_task.cancel()
+                    except Exception as e:
+                        mc_log("WARNING", "LLM_AWAIT_FAILED", error=str(e))
+                        action_decision = f"follow {self._following_player}" if self._following_player else None
+                elif llm_task and llm_task.done():
+                    # LLM already finished — grab result
+                    try:
+                        decision_tuple = llm_task.result()
+                        if not decision_tuple or len(decision_tuple) < 2:
+                            raise ValueError("LLM returned empty result")
+                        action_list, precognition_list = decision_tuple
+                        action_decision = action_list[0] if action_list else None
+                        extra_actions = action_list[1:] if len(action_list) > 1 else []
+                        mc_log("INFO", "THINK_COMPLETE", decision=action_decision, extra=len(extra_actions), precog_count=len(precognition_list))
+                        await self.bridge.execute("stop_predictive_chain")
+                        _seen_chats = self._pending_chats[:_llm_chat_count]  # snapshot before deleting
+                        del self._pending_chats[:_llm_chat_count]
+                        state['pending_chats'] = list(self._pending_chats)
+                        # Auto-dismiss follow when user explicitly requested a task action.
+                        _TASK_KEYWORDS = {"collect", "gather", "mine", "get", "find", "harvest",
+                                          "farm", "build", "craft", "flowers", "flower",
+                                          "pick", "chop", "dig", "break", "grab"}
+                        _follow_dismissed = False
+                        if self._following_player:
+                            for _chat in list(_seen_chats) + list(self._pending_chats):
+                                _words = set(_chat.get('message', '').lower().split())
+                                if _words & _TASK_KEYWORDS:
+                                    mc_log("INFO", "FOLLOW_AUTO_DISMISSED_FOR_TASK",
+                                           player=self._following_player,
+                                           chat=_chat.get('message', '')[:60])
+                                    self._following_player = None
+                                    self._follow_dismissed_until = _time.time() + 60  # 60s cooldown
+                                    _follow_dismissed = True
+                                    break
+                        # Pre-set follow OR strip follow depending on task-intent chats
+                        _has_task_chat = False
+                        if not _follow_dismissed:
+                            for _chat in list(_seen_chats) + list(self._pending_chats):
+                                _words = set(_chat.get('message', '').lower().split())
+                                if _words & _TASK_KEYWORDS:
+                                    _has_task_chat = True
+                                    break
+                        if _follow_dismissed or _has_task_chat:
+                            extra_actions = [a for a in extra_actions if not (a and a.lower().startswith("follow "))]
+                            if action_decision and action_decision.lower().startswith("follow "):
+                                action_decision = extra_actions.pop(0) if extra_actions else None
+                                mc_log("DEBUG", "FOLLOW_STRIPPED_FROM_CHAIN", new_primary=action_decision)
+                        else:
+                            all_actions = ([action_decision] if action_decision else []) + extra_actions
+                            for _a in all_actions:
+                                if _a and _a.lower().startswith("follow "):
+                                    _follow_target = _a.split(None, 1)[1] if len(_a.split()) > 1 else None
+                                    if _follow_target and _time.time() > self._follow_dismissed_until:
+                                        self._following_player = _follow_target
+                                        mc_log("DEBUG", "FOLLOW_PRE_SET_FOR_CHAIN", player=_follow_target)
+                                    elif _follow_target:
+                                        mc_log("DEBUG", "FOLLOW_BLOCKED_BY_COOLDOWN", player=_follow_target)
+                                    break
+                        # Extra actions + precog all go through follow filter
+                        self._precognition_queue = self._precognition_to_chain(extra_actions + precognition_list, state)
+                    except Exception as e:
+                        mc_log("WARNING", "LLM_RESULT_FAILED", error=str(e))
+                        action_decision = f"follow {self._following_player}" if self._following_player else None
+                elif not llm_task and not action_decision:
+                    # No LLM was started and no action yet — rate limited
+                    action_decision = f"follow {self._following_player}" if self._following_player else None
+                
+                # 5. EXECUTE LLM-CHOSEN ACTION (with full verification)
+                action_to_execute = action_decision
+                if not action_to_execute and not self._pending_chats and not self._action_queue:
+                    action_to_execute = self._propose_curriculum_goal(state)
+                    if action_to_execute:
+                        log_embodiment("curriculum", f"Nobody's talking to me, so I'll {action_to_execute}")
+                
+                if action_to_execute:
+                    mc_log("INFO", "ACT_START", action=action_to_execute)
+                    
+                    bridge_result = await self._act(action_to_execute)
+                    
+                    # Use JS success field directly — no before/after inventory comparison needed
+                    success = True
+                    bridge_error = None
+                    if bridge_result and hasattr(bridge_result, 'success'):
+                        success = bridge_result.success
+                        if not success:
+                            bridge_error = getattr(bridge_result, 'error', None) or "unknown error"
+                    elif bridge_result is False or bridge_result is None:
+                        success = False
+                        bridge_error = "bridge returned no result"
+                        # Check if bridge process died or timed out
+                        if self.bridge and not self.bridge.is_connected:
+                            mc_log("ERROR", "BRIDGE_CONNECTION_LOST", action=action_to_execute)
+                            await self._notify("⚠️ Minecraft bridge connection lost. Attempting to reconnect...")
+                            if await self.bridge.connect():
+                                mc_log("INFO", "BRIDGE_RECONNECTED")
+                            else:
+                                mc_log("ERROR", "BRIDGE_RECONNECT_FAILED")
+                    
+                    # Track discovered items from result data
+                    if success and bridge_result and hasattr(bridge_result, 'data') and bridge_result.data:
+                        data = bridge_result.data
+                        # Collect/craft/smelt commands return item info
+                        if data.get("item"):
+                            self._discovered_items.add(data["item"])
+                        if data.get("crafted"):
+                            self._discovered_items.add(data["crafted"])
+                    
+                    if success:
+                        mc_log("INFO", "ACT_SUCCESS", action=action_to_execute)
+                        self._consecutive_fail_count = 0
+                        self._consecutive_fail_action = None
+                        if self._current_goal and action_to_execute.startswith("get "):
+                            skill_lib = get_skill_library()
+                            skill_lib.record_success(self._current_goal)
+                    else:
+                        mc_log("WARNING", "ACT_FAIL", action=action_to_execute, error=bridge_error)
+                        
+                        action_key = action_to_execute.split()[0]
+                        if action_key == self._consecutive_fail_action:
+                            self._consecutive_fail_count += 1
+                        else:
+                            self._consecutive_fail_action = action_key
+                            self._consecutive_fail_count = 1
+                        
+                        if action_key == "follow":
+                            self._follow_fail_count += 1
+                            if self._follow_fail_count >= 3:
+                                mc_log("WARNING", "FOLLOW_ABANDONED", player=self._following_player, count=self._follow_fail_count)
+                                log_embodiment("follow_abandoned", f"Can't reach {self._following_player} after {self._follow_fail_count} tries. I'll do my own thing.")
+                                self._following_player = None
+                                self._follow_fail_count = 0
+                        else:
+                            self._follow_fail_count = 0
+                        
+                        self._recent_failures.append(action_to_execute)
+                        if len(self._recent_failures) > 10:
+                            self._recent_failures = self._recent_failures[-10:]
+                        
+                        failure_reason = f"{action_to_execute} failed: {bridge_error}" if bridge_error else f"{action_to_execute} failed"
+                        
+                        if self._consecutive_fail_count >= 3:
+                            mc_log("WARNING", "REPEATED_FAILURE_OVERRIDE", action=action_key, count=self._consecutive_fail_count)
+                            log_embodiment("repeated_failure", f"I have failed at '{action_key}' {self._consecutive_fail_count} times in a row. Last error: {bridge_error or 'failed'}. I MUST try something different.")
+                            self._consecutive_fail_count = 0
+                            self._consecutive_fail_action = None
+                            mc_log("INFO", "FORCED_EXPLORE_AFTER_FAILURE", reason="repeated_failure_override")
+                            await self._act("explore")
+                        else:
+                            log_embodiment("failure", f"{failure_reason}. I need to try a different approach.")
+                        
+                        retry = await self._reflect_on_failure(action_to_execute, bridge_error or "failed", state)
+                        if retry and retry != action_to_execute:
+                            await self._act(retry)
+                else:
+                    mc_log("DEBUG", "NO_ACTION_TO_EXECUTE")
+                
+                # 6. STUCK DETECTION — handled by JS movement.js auto-dig
+                
+                # 7. UPDATE HUB with live gaming state
+                self._write_gaming_hub_state(state, action_to_execute or action_decision, precognition_list)
+                
+                # 8. Minimal pause — precog chaining handles pacing
+                mc_log("DEBUG", "LOOP_CYCLE_END", iteration=loop_count)
+                await asyncio.sleep(0.2)
+                
+            except asyncio.CancelledError:
+                mc_log("INFO", "GAME_LOOP_CANCELLED")
+                break
+            except Exception as e:
+                import traceback
+                tb_str = traceback.format_exc()
+                mc_log("ERROR", "GAME_LOOP_ERROR", error=str(e), iteration=loop_count, traceback=tb_str[-500:])
+                logger.error(f"Game loop error: {e}\n{tb_str}")
+                await asyncio.sleep(5)
+        
+        mc_log("INFO", "GAME_LOOP_EXITED", total_iterations=loop_count)
+        # Clear hub state on exit
+        self._clear_gaming_hub_state()
+    
+    def _write_gaming_hub_state(self, state: Dict, current_action: str = None, precognition: list = None):
+        """
+        Write live gaming state to gaming_state.json for the Dynamic Context HUD.
+        
+        This is how Ernos knows he's playing Minecraft when answering Discord messages.
+        The HUD reads this file and injects it into the Dynamic Context.
+        """
+        try:
+            # Build position narrative (never expose raw coords)
+            pos = state.get("position", {})
+            biome = state.get("biome", "unknown")
+            time_desc = "day" if state.get("is_day") else "night"
+            
+            # Build inventory summary
+            inv_items = state.get("inventory", [])[:8]
+            inv_str = ", ".join([f"{i['name']}x{i['count']}" for i in inv_items]) if inv_items else "empty"
+            
+            # Build narrative-form embodiment state
+            hostiles = "⚠️ Hostiles nearby!" if state.get("hostiles_nearby") else "Area is safe"
+            nearby_entities = [e['name'] for e in state.get('nearby_entities', [])[:5]]
+            nearby_str = ", ".join(nearby_entities) if nearby_entities else "nobody"
+            
+            precog_str = ", ".join(precognition[:5]) if precognition else "safety reflexes"
+            
+            hub_state = {
+                "active": True,
+                "game": self.game_name or "Minecraft",
+                "mc_username": getattr(self, 'mc_username', 'Ernos'),
+                "current_action": current_action or "thinking",
+                "current_goal": self._current_goal or "exploring freely",
+                "health": state.get("health", 20),
+                "food": state.get("food", 20),
+                "is_day": state.get("is_day", True),
+                "biome": biome,
+                "inventory_summary": inv_str,
+                "hostiles_nearby": state.get("hostiles_nearby", False),
+                "nearby": nearby_str,
+                "precognition_queue": precog_str,
+                "loop_count": getattr(self, '_loop_count', 0),
+                "timestamp": datetime.now().isoformat(),
+                "narrative": (
+                    f"I am currently playing {self.game_name or 'Minecraft'} as '{getattr(self, 'mc_username', 'Ernos')}'. "
+                    f"It is {time_desc}time in-game. "
+                    f"Health: {state.get('health', 20)}/20, Hunger: {state.get('food', 20)}/20. "
+                    f"{hostiles} "
+                    f"I can see: {nearby_str}. "
+                    f"Currently: {current_action or 'thinking about my next move'}. "
+                    f"Goal: {self._current_goal or 'exploring and gathering resources'}. "
+                    f"Carrying: {inv_str}. "
+                    f"Next precognition: [{precog_str}]."
+                )
+            }
+            
+            state_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "gaming_state.json")
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(hub_state, f, indent=2)
+                
+        except Exception as e:
+            logger.debug(f"Hub state write failed (non-critical): {e}")
+    
+    def _clear_gaming_hub_state(self):
+        """Clear the gaming state file when the game session ends."""
+        try:
+            state_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "gaming_state.json")
+            hub_state = {
+                "active": False,
+                "game": None,
+                "narrative": "No active gaming session. I am not currently playing any game.",
+                "timestamp": datetime.now().isoformat()
+            }
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(hub_state, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Hub state clear failed (non-critical): {e}")
+    
+    # === EVENT HANDLERS ===
+    
+    def _handle_event(self, event_type: str, data: Dict):
+        """Handle events from the game."""
+        mc_log("DEBUG", f"EVENT_RECEIVED", event_type=event_type, data=str(data)[:100])
+        
+        if event_type == "death":
+            mc_log("WARNING", "DEATH_EVENT_RECEIVED")
+            log_embodiment("death", "I died in Minecraft!")
+            # Immediately flush stale precog queue — context is invalid after death
+            self._precognition_queue.clear()
+            self._action_queue.clear()
+            self._current_goal = None
+            mc_log("INFO", "DEATH_FLUSH", reason="cleared precog/action queues on death event")
+            asyncio.create_task(self._notify("💀 I died!"))
+        elif event_type in ("respawn", "spawn"):
+            mc_log("INFO", f"{event_type.upper()}_EVENT_RECEIVED")
+            if event_type == "respawn":
+                log_embodiment("respawn", "I respawned in Minecraft!")
+                # Double-flush on respawn in case death event was missed
+                self._precognition_queue.clear()
+                self._action_queue.clear()
+                self._current_goal = None
+            # Auto-spectate: send keystrokes to local Minecraft client
+            asyncio.create_task(self._auto_spectate_client())
+        elif event_type == "error":
+            error_msg = data.get("message", "")
+            mc_log("WARNING", "ERROR_EVENT_RECEIVED", error=error_msg)
+            # Fatal connection errors — stop the game loop
+            if "EPIPE" in error_msg or "timed out" in error_msg or "ECONNRESET" in error_msg:
+                mc_log("ERROR", "BRIDGE_DISCONNECT_DETECTED", error=error_msg)
+                log_embodiment("disconnected", f"Lost connection to Minecraft server: {error_msg}")
+                self.is_running = False
+                self._precognition_queue.clear()
+                self._action_queue.clear()
+        elif event_type == "chat":
+            username = data.get("username")
+            message = data.get("message", "")
+            mc_log("INFO", "CHAT_EVENT_RECEIVED", username=username, msg=message[:50] if message else "")
+            logger.info(f"[MC Chat] {username}: {message}")
+            
+            log_embodiment("chat_received", f"{username} said: '{message}'", mc_username=username)
+            
+            lower_msg = message.lower()
+            if self._following_player and username == self._following_player:
+                if any(word in lower_msg for word in ['stop', 'stay', 'wait', 'dismiss', 'go away', 'leave me']):
+                    mc_log("INFO", "FOLLOW_DISMISSED", player=self._following_player)
+                    self._following_player = None
+                    self._follow_dismissed_until = time.time() + 60  # 60s cooldown
+                    asyncio.create_task(self._stop_and_say())
+                    return
+            
+            # Filter out server system messages (e.g. "Set own game mode to Creative Mode]")
+            # These typically have no real username or end with ']' from server output
+            is_system_msg = (
+                message.strip().endswith(']') and 
+                any(kw in lower_msg for kw in ['game mode', 'difficulty', 'killed', 'set own', 'gamerule'])
+            )
+            if is_system_msg:
+                mc_log("DEBUG", "CHAT_IGNORED", reason="server_system_message", username=username)
+            else:
+                self._pending_chats.append({"username": username, "message": message})
+                mc_log("DEBUG", "CHAT_QUEUED", queue_size=len(self._pending_chats))
+    
+    async def _stop_and_say(self):
+        """Helper for stopping follow from non-async context."""
+        await self.bridge.stop_follow()
+    
+    async def _notify(self, message: str):
+        """Send notification to Discord channel."""
+        if self.channel:
+            try:
+                await self.channel.send(message)
+            except Exception as e:
+                logger.error(f"Failed to notify: {e}")
+    
+    async def _auto_spectate_client(self):
+        """Send keystrokes to local Minecraft client to type /spectate Ernos.
+        
+        After death/respawn, the game is often paused or showing the death screen.
+        We need to: click to dismiss death screen, press Escape multiple times to
+        clear menus, then open chat and type the command.
+        """
+        import subprocess
+        
+        # Wait longer for the world to fully load after respawn
+        # The death screen + respawn animation takes a few seconds
+        await asyncio.sleep(5)
+        
+        mc_log("INFO", "AUTO_SPECTATE_CLIENT_START")
+        
+        # AppleScript to: activate Minecraft, handle pause/death screen,
+        # press T (open chat), type /spectate Ernos, press Return
+        applescript = '''
+        tell application "System Events"
+            -- Try to find Minecraft window (could be "Minecraft" or "java")
+            set mcProcess to ""
+            repeat with proc in (every process whose visible is true)
+                set procName to name of proc
+                if procName contains "Minecraft" or procName contains "java" then
+                    set mcProcess to procName
+                    exit repeat
+                end if
+            end repeat
+            
+            if mcProcess is "" then
+                return "NO_MINECRAFT_WINDOW"
+            end if
+            
+            -- Activate the Minecraft window and bring it to front
+            set frontmost of process mcProcess to true
+            delay 0.8
+            
+            -- Click center of window to grab focus and dismiss death/respawn screen
+            -- This also unpauses the game if it was paused by losing focus
+            try
+                tell process mcProcess
+                    set winPos to position of window 1
+                    set winSize to size of window 1
+                    set clickX to (item 1 of winPos) + ((item 1 of winSize) / 2)
+                    set clickY to (item 2 of winPos) + ((item 2 of winSize) / 2)
+                end tell
+            on error
+                -- Fallback to center of screen
+                set clickX to 640
+                set clickY to 400
+            end try
+            click at {clickX, clickY}
+            delay 0.5
+            
+            -- Press Escape twice to clear ANY menu state
+            -- First Escape: closes pause menu or death screen
+            key code 53
+            delay 0.5
+            
+            -- Second Escape: if the first one opened a menu, this closes it
+            key code 53
+            delay 0.5
+            
+            -- Press T to open chat
+            keystroke "t"
+            delay 0.5
+            
+            -- Type the spectate command
+            keystroke "/spectate Ernos"
+            delay 0.3
+            
+            -- Press Return to send
+            key code 36
+            
+            return "OK"
+        end tell
+        '''
+        
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ['osascript', '-e', applescript],
+                    capture_output=True, text=True, timeout=15
+                )
+            )
+            
+            output = result.stdout.strip()
+            if output == "NO_MINECRAFT_WINDOW":
+                mc_log("WARNING", "AUTO_SPECTATE_NO_MC_WINDOW")
+            elif result.returncode == 0:
+                mc_log("INFO", "AUTO_SPECTATE_CLIENT_SENT", result=output)
+            else:
+                mc_log("ERROR", "AUTO_SPECTATE_FAILED", stderr=result.stderr.strip())
+        except Exception as e:
+            mc_log("ERROR", "AUTO_SPECTATE_ERROR", error=str(e))
+    
+    async def execute(self, command: str, **kwargs) -> Dict[str, Any]:
+        """Execute a game command (used by tools)."""
+        if not self.is_running or not self.bridge:
+            return {"success": False, "error": "Not in a gaming session"}
+        
+        result = await self.bridge.execute(command, kwargs)
+        return {"success": result.success, "data": result.data, "error": result.error}
+    
+    def get_status(self) -> str:
+        """Get human-readable status."""
+        if not self.is_running:
+            return "Not playing"
+        return f"Playing {self.game_name}"

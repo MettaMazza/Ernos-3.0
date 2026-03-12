@@ -1,0 +1,79 @@
+
+> ernos-mineflayer@1.0.0 test
+> jest --coverage --forceExit
+
+(node:18277) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/shared.test.js
+(node:18276) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:18275) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/autonomy.test.js
+PASS __tests__/equip_utils.test.js
+(node:18273) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/persistence.test.js
+(node:18274) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/farming.test.js
+(node:18272) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/social.test.js
+(node:18271) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/combat_cmds.test.js
+(node:18270) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/visual.test.js
+(node:18268) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/resources.test.js
+(node:18269) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/combat.test.js
+(node:18267) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 uncaughtException listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:18267) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 unhandledRejection listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:18267) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:18267) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 SIGTERM listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:18267) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 SIGINT listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:18267) Warning: `--localstorage-file` was provided without a valid path
+PASS __tests__/bot.test.js
+(node:18266) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/building.test.js
+(node:18265) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/reflexes.test.js
+(node:18264) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/movement.test.js
+---------------------|---------|----------|---------|---------|-------------------------------------------
+File                 | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                         
+---------------------|---------|----------|---------|---------|-------------------------------------------
+All files            |   83.96 |    70.13 |   81.41 |   86.74 |                                           
+ mineflayer          |   81.46 |    65.91 |   83.87 |   85.62 |                                           
+  autonomy.js        |    86.3 |    79.06 |   78.57 |   93.75 | 68,135-136,142                            
+  bot.js             |   98.76 |     87.5 |     100 |   98.68 | 184                                       
+  combat.js          |   87.12 |    79.44 |   77.77 |   91.52 | 73-76,145,256,261-272                     
+  persistence.js     |     100 |      100 |     100 |     100 |                                           
+  reflexes.js        |   66.96 |    42.85 |   69.56 |   73.65 | 50,82,130-194,232,273-286                 
+  shared.js          |     100 |    85.71 |     100 |     100 | 20                                        
+  visual.js          |   74.78 |    53.84 |   83.33 |   74.77 | 36-39,45-48,56-67,134-135,153-162,183-185 
+ mineflayer/commands |   85.95 |    73.78 |   78.43 |   87.65 |                                           
+  building.js        |   87.91 |    82.95 |   70.58 |    89.1 | 66,70-71,232-249                          
+  combat_cmds.js     |   93.16 |    80.35 |   76.47 |      95 | 16,61-63,71                               
+  equip_utils.js     |    95.4 |     91.3 |     100 |     100 | 25,48,71,107                              
+  farming.js         |   91.22 |    72.54 |   69.23 |   93.33 | 136-141                                   
+  movement.js        |   80.64 |       75 |   88.88 |   82.06 | 53,136-174,181                            
+  resources.js       |   78.81 |    64.46 |   68.75 |   79.64 | 115-117,164-202,209-219,241,274,304       
+  social.js          |   82.72 |    60.86 |   86.66 |    85.1 | 30-55,85                                  
+---------------------|---------|----------|---------|---------|-------------------------------------------
+
+Test Suites: 14 passed, 14 total
+Tests:       333 passed, 333 total
+Snapshots:   0 total
+Time:        2.749 s, estimated 3 s
+Ran all test suites.
+Force exiting Jest: Have you considered using `--detectOpenHandles` to detect async operations that kept running after all tests finished?

@@ -1,0 +1,195 @@
+import discord
+from discord.ext import commands
+import logging
+from config import settings
+from src.tools.registry import ToolRegistry
+
+logger = logging.getLogger("Cogs.Support")
+
+class SupportCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.support_channel_id = getattr(settings, 'SUPPORT_CHANNEL_ID', None)
+        from src.prompts import PromptManager
+        self.prompt_manager = PromptManager(prompt_dir="src/prompts")
+        logger.info(f"SupportCog initialized. Watching channel: {self.support_channel_id}")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        # Ignore own messages, DMs, or empty/system messages
+        if message.author.id == self.bot.user.id or not message.content or not message.guild:
+            return
+
+        # Block non-admins during testing mode
+        if getattr(settings, 'TESTING_MODE', False):
+            if message.author.id not in getattr(settings, 'ADMIN_IDS', {settings.ADMIN_ID}):
+                return
+
+        # 1. NEW TICKET: Message in Root Support Channel
+        if message.channel.id == self.support_channel_id:
+            await self.handle_new_ticket(message)
+            return
+
+        # 2. ONGOING TICKET: Message in a Support Thread
+        if isinstance(message.channel, discord.Thread) and message.channel.parent_id == self.support_channel_id:
+            await self.handle_thread_reply(message)
+            return
+
+    async def handle_new_ticket(self, message: discord.Message):
+        """Creates a new support thread and starts the conversation."""
+        try:
+            # Create Thread
+            thread_name = f"Support - {message.author.display_name}"
+            thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
+            logger.info(f"Created support thread: {thread.name} ({thread.id})")
+            
+            # Initial Greeting
+            greeting = f"Hi {message.author.mention}! I've opened this thread to help you. Checking your issue now..."
+            await thread.send(greeting)
+            
+            # Generate AI Response to the issue
+            await self.generate_support_response(thread, message.author, message.content, is_new=True)
+
+        except Exception as e:
+            logger.error(f"Failed to create support ticket: {e}")
+            await message.add_reaction("⚠️")
+
+    async def handle_thread_reply(self, message: discord.Message):
+        """Continues the conversation in an existing support thread."""
+        await self.generate_support_response(message.channel, message.author, message.content, is_new=False)
+
+    async def generate_support_response(self, thread, user, user_input, is_new=False):
+        """Generates AI response using the dedicated Support System Prompt."""
+        try:
+            # Ensure Cognition Engine is available (Wrapper for ReAct Loop)
+            cognition = getattr(self.bot, 'cognition', None)
+            if not cognition:
+                try:
+                    from src.engines.cognition import CognitionEngine
+                    self.bot.cognition = CognitionEngine(self.bot)
+                    cognition = self.bot.cognition
+                except Exception as e:
+                    logger.error(f"Failed to initialize CognitionEngine: {e}")
+            
+            if not cognition:
+                await thread.send("System Error: Brain (CognitionEngine) not found. Escalating automatically.")
+                return
+
+            # Load Core Identity & User Manual
+            from src.core.secure_loader import load_prompt
+            
+            identity_text = load_prompt("src/prompts/identity_core.txt") or "You are Ernos."
+            manual_text = load_prompt("src/prompts/user_manual.txt") or "No manual found."
+
+            # Support Persona Prompt
+            # INJECT TOOL MANIFEST so the LLM knows HOW to use escalate_ticket
+            tool_manifest = self.prompt_manager._generate_tool_manifest()
+            
+            system_prompt = (
+                f"{identity_text}\n\n"
+                f"=== OFFICIAL USER MANUAL & COMMANDS ===\n"
+                f"{manual_text}\n\n"
+                f"{tool_manifest}\n\n"
+                "=== SUPPORT MODE ACTIVATED ===\n"
+                "Your Goal: Help the user with their issue using the MANUAL above. Be the real Ernos, not a generic bot.\n"
+                "1. If use asks 'How do I...', quote the COMMANDS from the manual.\n"
+                "2. Do NOT hallucinate ways to do things (e.g. 'just ask me to switch'). use the SLASH COMMANDS.\n"
+                "3. If they ask about personas, explain the `/persona` command.\n"
+                "4. CRITICAL: If you cannot solve it or they ask for a human, use `escalate_ticket` IMMEDIATELY.\n"
+                "5. USE THE TOOLS. If you see [TOOL: escalate_ticket(...)], use it. Do not say you cannot.\n"
+            )
+
+            # Build Context String
+            context_str = ""
+            if not is_new:
+                # Fetch recent history for context
+                # Limit to last 10 messages
+                history_msgs = []
+                async for m in thread.history(limit=10, before=None):
+                    if not m.content: continue
+                    # Skip the instruction message we are currently processing? 
+                    # No, we want the PREVIOUS messages.
+                    # message.channel.history(limit=10) includes the current message if called after it's posted?
+                    # The `user_input` passed to this function IS the current message content.
+                    # We should exclude the current message from HISTORY if it's there, to avoid duplication?
+                    # Actually `input_text` is passed separately to `process`.
+                    # `context` should be PAST history.
+                    
+                    # If this is handle_thread_reply, the message is already in the channel.
+                    # So history() will find it.
+                    # We should filter it out?
+                    # Or just use history string as context.
+                    # Let's simple format:
+                    role_tag = "[Assistant]" if m.author == self.bot.user else f"[User {m.author.name}]"
+                    history_msgs.append(f"{role_tag}: {m.content}")
+                
+                # Reverse to chronological order
+                history_msgs.reverse()
+                
+                # Exclude the very last message if it matches user_input?
+                # This prevents "User: Input" appearing in context AND as input_text.
+                if history_msgs and user_input in history_msgs[-1]:
+                    history_msgs.pop()
+                    
+                context_str = "\n".join(history_msgs)
+
+            # ─── HIGH-RECALL RAG INJECTION ───
+            # User explicitly requested "highest possible" retrieval.
+            # We manually query the Hippocampus and inject it here since CognitionEngine
+            # skips internal RAG when 'context' is provided.
+            hippocampus = getattr(self.bot, 'hippocampus', None)
+            if hippocampus:
+                try:
+                    # Recall relevant memories/facts
+                    # We treat the support thread as a specific context
+                    memory_ctx = hippocampus.recall(
+                        query=user_input,
+                        user_id=user.id,
+                        channel_id=thread.id,
+                        is_dm=False
+                    )
+                    
+                    rag_content = []
+                    
+                    # Add Vector Memories (Past solutions, docs)
+                    if memory_ctx.related_memories:
+                        rag_content.append(f"--- RELEVANT KNOWLEDGE (VECTOR) ---\n" + "\n".join(memory_ctx.related_memories))
+                        
+                    # Add Graph Facts (User profile, system status)
+                    if memory_ctx.knowledge_graph:
+                        rag_content.append(f"--- SYSTEM FACTS (GRAPH) ---\n" + "\n".join(memory_ctx.knowledge_graph))
+                        
+                    # Add Lessons
+                    if memory_ctx.lessons:
+                        rag_content.append(f"--- LEARNED LESSONS ---\n" + "\n".join(memory_ctx.lessons))
+                        
+                    if rag_content:
+                        retrieved_block = "\n\n".join(rag_content)
+                        context_str += f"\n\n[RETRIEVED KNOWLEDGE BASE]:\n{retrieved_block}\n[END KNOWLEDGE BASE]\n"
+                        logger.info(f"Injected {len(retrieved_block)} chars of RAG context into Support request.")
+                        
+                except Exception as rag_err:
+                    logger.error(f"Support RAG failed: {rag_err}")
+
+            async with thread.typing():
+                # Use PROCESS method which supports tools
+                response_text, artifacts, *_ = await cognition.process(
+                    input_text=user_input,
+                    context=context_str,
+                    system_context=system_prompt,
+                    images=None, # Support currently text-only
+                    complexity="HIGH",
+                    user_id=str(user.id),
+                    channel_id=str(thread.id),
+                    request_scope="SUPPORT"
+                )
+            
+            if response_text:
+                await thread.send(response_text)
+
+        except Exception as e:
+            logger.error(f"Failed to generate support response: {e}")
+            await thread.send(f"I'm having trouble thinking right now. (System Error: {e}). Please wait for a human admin.")
+
+async def setup(bot):
+    await bot.add_cog(SupportCog(bot))

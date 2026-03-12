@@ -1,0 +1,7 @@
+Original Code:
+{code}
+
+Error Output:
+{error}
+
+Fix the code. Return ONLY the full corrected python script. No markdown.

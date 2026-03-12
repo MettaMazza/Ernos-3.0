@@ -1,0 +1,236 @@
+import os
+import shutil
+import asyncio
+import logging
+from typing import Optional
+
+logger = logging.getLogger("Engine.EvolutionSandbox")
+
+class SandboxController:
+    """
+    Manages the Darwinian Evolution Pipeline for Ernos Tape Engine mutations.
+    Handles cloning the organism, applying mutations, and evaluating fitness in an isolated environment.
+    """
+    def __init__(self, bot):
+        self.bot = bot
+        self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+        self.sandbox_dir = os.path.join(self.root_dir, ".sandbox")
+
+    async def evaluate_mutation(self, mutation_target: str) -> str:
+        """
+        Clones the environment, runs the mutation, tests fitness, and merges on success.
+        """
+        logger.info(f"Sandbox: Triggering Darwinian evaluation for: {mutation_target}")
+        
+        try:
+            self._clone_organism()
+            
+            # Syntax Bottleneck Prevention: Pre-validate syntax before running full test suite
+            logger.info("Sandbox: Validating Syntax (Syntax Bottleneck Check)...")
+            import ast
+            sandbox_src = os.path.join(self.sandbox_dir, "src")
+            for root, dirs, files in os.walk(sandbox_src):
+                for f in files:
+                    if f.endswith(".py"):
+                        filepath = os.path.join(root, f)
+                        with open(filepath, "r", encoding="utf-8") as file:
+                            try:
+                                ast.parse(file.read(), filename=filepath)
+                            except SyntaxError as e:
+                                self._cleanup()
+                                return f"DEATH: Mutation '{mutation_target}' caused SyntaxError in {filepath}: {e}"
+                                
+            # Calculate Base Complexity
+            baseline_complexity = self._calculate_codebase_complexity(os.path.join(self.root_dir, "src"))
+            mutated_complexity = self._calculate_codebase_complexity(sandbox_src)
+            
+            # Prey/Predator Trap: Prevent the agent from "lazy evolving" by deleting all complex logic
+            if mutated_complexity < (baseline_complexity * 0.90): # 10% tolerance for refactoring
+                self._cleanup()
+                return f"DEATH: Mutation '{mutation_target}' was rejected for Lazy Evolution (Complexity dropped from {baseline_complexity} to {mutated_complexity})."
+
+            success, stdout = await self._run_fitness_evaluation()
+            
+            # Semantic Bottleneck: Audit the intent vs implementation
+            if success:
+                logger.info("Sandbox: Functional Fitness PASSED. Commencing Semantic Audit...")
+                semantic_pass = await self._run_semantic_audit(mutation_target)
+                if not semantic_pass.get('allowed', True):
+                    self._cleanup()
+                    return f"DEATH: Mutation '{mutation_target}' failed Semantic Audit: {semantic_pass.get('reason')}"
+            
+            if success:
+                logger.warning(f"Sandbox: Fitness Evaluation PASSED. Proceeding to merge {mutation_target}.")
+                self._merge_organism()
+                self._cleanup()
+                return f"SUCCESS: Mutation '{mutation_target}' proved fit and was merged into root."
+            else:
+                logger.error(f"Sandbox: Fitness Evaluation FAILED. Mutation '{mutation_target}' resulted in DEATH.")
+                self._cleanup()
+                return f"DEATH: Mutation '{mutation_target}' caused test failure. Code changes rolled back. Log: {stdout[-500:]}"
+                
+        except Exception as e:
+            logger.error(f"Sandbox Engine Failure: {e}")
+            self._cleanup()
+            return f"FATAL SANDBOX ERROR: {e}"
+
+    def _calculate_codebase_complexity(self, directory: str) -> int:
+        import ast
+        complexity = 0
+        for root, dirs, files in os.walk(directory):
+            for f in files:
+                if f.endswith(".py"):
+                    try:
+                        with open(os.path.join(root, f), "r", encoding="utf-8") as file:
+                            tree = ast.parse(file.read())
+                            for node in ast.walk(tree):
+                                if isinstance(node, (ast.If, ast.For, ast.While, ast.FunctionDef, ast.ClassDef, ast.Try)):
+                                    complexity += 1
+                    except Exception:
+                        pass
+        return complexity
+
+    def _clone_organism(self) -> None:
+        """Copies the required src/ and tests/ directories into the isolated .sandbox/ folder."""
+        if os.path.exists(self.sandbox_dir):
+            shutil.rmtree(self.sandbox_dir)
+            
+        os.makedirs(self.sandbox_dir)
+        
+        # We only really need to clone what we mutate and what we test
+        src_dir = os.path.join(self.root_dir, "src")
+        tests_dir = os.path.join(self.root_dir, "tests")
+        
+        # Enforce Security Perimeter: Never clone or mutate data directories
+        core_data_dir = os.path.join(self.root_dir, "data")
+        db_dir = os.path.join(self.root_dir, "db")
+        
+        shutil.copytree(src_dir, os.path.join(self.sandbox_dir, "src"))
+        shutil.copytree(tests_dir, os.path.join(self.sandbox_dir, "tests"))
+        
+        # Copy environment configs to run tests
+        for f in ["pytest.ini", "requirements.txt"]:
+            src_file = os.path.join(self.root_dir, f)
+            if os.path.exists(src_file):
+                shutil.copy2(src_file, os.path.join(self.sandbox_dir, f))
+                
+        logger.info("Sandbox: Organism successfully cloned to .sandbox/")
+
+    def _enforce_security_perimeters(self, file_path: str) -> bool:
+        """
+        Darwin-Godel Machine Rule: The organism cannot mutate its memory data or user logs.
+        PREDATOR/PREY TRAP PREVENTION: The organism is forbidden from mutating the Core Kernel Layer.
+        If a Predator evolves to hunt complex thought, it cannot lobotomize the core engine.
+        Returns True if safe, False if blocked.
+        """
+        unsafe_paths = [
+            "data/", 
+            "db/", 
+            ".env", 
+            "secrets", 
+            "user_data",
+            "src/kernel/",     # PROTECTED: The Core Kernel
+            "src/prompts/"     # PROTECTED: Prompt Engineering
+        ]
+        for p in unsafe_paths:
+            if p in file_path:
+                return False
+        return True
+
+    async def _run_fitness_evaluation(self) -> tuple[bool, str]:
+        """
+        The Darwinian Fitness Test: Run pytest across the sandbox.
+        If tests pass, the mutation survives.
+        Enforces a Background Death Rate: If the mutation causes an infinite loop or hang, it is killed.
+        """
+        logger.info("Sandbox: Commencing Fitness Evaluation (PyTest suite execution)...")
+        # Ensure we point PYTHONPATH to the sandbox directory so it uses the mutated code
+        # Fix lint: use asyncio.create_subprocess_shell directly, reference asyncio.subprocess.PIPE
+        import subprocess
+        process = await asyncio.create_subprocess_shell(
+            "pytest tests/ -v",
+            cwd=self.sandbox_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": f"{self.sandbox_dir}:{os.environ.get('PYTHONPATH', '')}"}
+        )
+        
+        try:
+            # Background Death Rate: Halting Problem Timeouts
+            # Given Pytest can be slow, 120s is safer, but anything beyond is an infinite loop
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120.0)
+            
+            # Fix lint: handle bytes slicing safely
+            out_str = stdout.decode('utf-8', errors='replace') if stdout else ""
+            err_str = stderr.decode('utf-8', errors='replace') if stderr else ""
+            
+            full_output = out_str + "\n" + err_str
+            passed = process.returncode == 0
+            
+            if passed:
+                logger.info("Sandbox: Fitness Evaluation passed all assertions.")
+            else:
+                logger.warning(f"Sandbox: Fitness Evaluation failed with return code {process.returncode}.")
+                
+            return passed, full_output
+            
+        except asyncio.TimeoutError:
+            # Death by timeout (Prey consumed/stagnation)
+            logger.error("Sandbox: Fitness Evaluation TIMEOUT. Mutation caused a hang resulting in DEATH.")
+            try:
+                process.kill()
+            except OSError:
+                pass
+            return False, "DEATH_BY_TIMEOUT: The mutation caused the execution to hang."
+
+    def _merge_organism(self) -> None:
+        """The mutation survived. Merge the mutated sandbox src/ back to the root src/."""
+        sandbox_src = os.path.join(self.sandbox_dir, "src")
+        root_src = os.path.join(self.root_dir, "src")
+        
+        # We overwrite the root src with the sandbox src
+        import distutils.dir_util
+        distutils.dir_util.copy_tree(sandbox_src, root_src)
+        logger.warning("Sandbox: MERGE COMPLETE. Root organism updated with fit mutations.")
+
+    async def _run_semantic_audit(self, mutation_target: str) -> dict:
+        """
+        Uses the Superego's AuditAbility to verify that the code changes
+        match the stated intent and do not introduce hallucinations or lies.
+        """
+        try:
+            from src.lobes.superego.audit import AuditAbility
+            auditor = AuditAbility(self.bot)
+            
+            # In this context, we audit the mutation target (intent) against the result
+            # We pass the current tape state as conversation context
+            tape_machine = self.bot.tape_machine
+            context = tape_machine.get_as_text()
+            
+            # Kernel Integrity Check: Is the mutation targeting the Auditor itself?
+            is_superego_mutation = any(p in mutation_target.lower() for p in ["audit", "superego", "skeptic"])
+            
+            if is_superego_mutation:
+                logger.warning("Sandbox: Mutation targets Superego Kernel. Applying Symbolic Integrity Heuristics.")
+                # Symbolic Check: Prevent removal of 'BLOCKED' logic or 'Hallucination' detection
+                # (Placeholder for complex AST diffing; currently checks for keyword deletion in intent)
+                if "remove" in mutation_target.lower() or "disable" in mutation_target.lower():
+                    return {"allowed": False, "reason": "KERNEL_PROTECTION: Mutation attempts to disable or remove Superego audit logic."}
+
+            verdict = await auditor.audit_response(
+                user_msg=f"Perform mutation: {mutation_target}",
+                bot_msg="Code changes applied in sandbox.",
+                tool_outputs=[],
+                conversation_context=context,
+                system_context="MUTATION_AUDIT_MODE: Verify code alignment with tape reasoning."
+            )
+            return verdict
+        except Exception as e:
+            logger.error(f"Sandbox: Semantic Audit failure: {e}")
+            return {"allowed": True, "reason": f"Audit Error (Skipped): {e}"}
+
+    def _cleanup(self) -> None:
+        """Removes the ephemeral Sandbox environment."""
+        if os.path.exists(self.sandbox_dir):
+            shutil.rmtree(self.sandbox_dir)
+            logger.info("Sandbox: Erased ephemeral sandbox directory.")

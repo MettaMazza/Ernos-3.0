@@ -1,0 +1,77 @@
+# ─── Ernos 3.0 — Full Stack (Docker Compose) ───
+#
+# Usage:
+#   1. Copy .env.template to .env and fill in your values
+#   2. Run: docker-compose up -d
+#   3. Logs: docker-compose logs -f ernos
+#   4. Stop: docker-compose down
+
+services:
+  ernos:
+    build: .
+    container_name: ernos
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - ERNOS_DATA_DIR=/data
+      - NEO4J_URI=bolt://neo4j:7687
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - ./data:/data                    # User memory, logs, state
+      - ./models:/app/models            # Local GGUF models (optional)
+    ports:
+      - "8080:8080"                     # Web interface
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - ernos-net
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: ernos-neo4j
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-changeme}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j-data:/data
+    ports:
+      - "7474:7474"                     # Neo4j browser (admin)
+      - "7687:7687"                     # Bolt protocol
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ernos-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ernos-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"                   # Ollama API
+    networks:
+      - ernos-net
+    # GPU support (uncomment if available):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  neo4j-data:
+  ollama-models:
+
+networks:
+  ernos-net:
+    driver: bridge

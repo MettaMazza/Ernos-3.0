@@ -1,0 +1,724 @@
+"""
+Audiobook Production Pipeline for Ernos.
+
+Orchestrates three engines into a full audiobook:
+  - Kokoro ONNX    → Ernos's narrator voice (fast, consistent)
+  - Qwen3-TTS      → Character voices (VoiceDesign → VoiceClone for consistency)
+  - MusicGen Large  → Background music, atmosphere, sound effects
+
+Script format uses markers:
+  [NARRATE] Narration text here.
+  [VOICE: "CharName" | voice description for Qwen3-TTS]
+  "Dialogue text spoken by CharName."
+  [MUSIC: prompt for MusicGen, duration in seconds]
+  [SFX: short sound effect description, duration in seconds]
+  [BG_MUSIC: prompt, duration] — plays UNDER subsequent segments
+  [BG_SFX: prompt, duration]   — ambient SFX layered under speech
+  [PAUSE: seconds]
+"""
+import asyncio
+import logging
+import os
+import re
+import time
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+import soundfile as sf
+
+logger = logging.getLogger("AudiobookProducer")
+
+
+# ──────────────────────────────────────────────────────────────
+#  Script Segment Types
+# ──────────────────────────────────────────────────────────────
+
+@dataclass
+class Segment:
+    """A single segment of the audiobook script."""
+    kind: str            # NARRATE, VOICE, MUSIC, SFX, BG_MUSIC, BG_SFX, PAUSE
+    text: str = ""       # Text to speak (NARRATE/VOICE) or prompt (MUSIC/SFX)
+    character: str = ""  # Character name for VOICE segments
+    voice_desc: str = "" # Voice description for first-time VoiceDesign
+    duration: float = 0  # Duration in seconds for MUSIC/SFX/PAUSE
+
+
+# ──────────────────────────────────────────────────────────────
+#  Script Parser
+# ──────────────────────────────────────────────────────────────
+
+def parse_script(script: str) -> list[Segment]:
+    """
+    Parse a marked-up audiobook script into typed segments.
+    
+    Supported markers:
+      [NARRATE] text...
+      [VOICE: "CharName" | voice description]
+      "Dialogue line"                          ← assigned to last declared VOICE
+      [MUSIC: prompt, Ns]
+      [SFX: prompt, Ns]
+      [BG_MUSIC: prompt, Ns]  ← background music layered under subsequent segments
+      [BG_SFX: prompt, Ns]    ← ambient SFX layered under subsequent segments
+      [PAUSE: Ns]
+    """
+    segments: list[Segment] = []
+    current_character = ""
+    current_voice_desc = ""
+    
+    lines = script.strip().split("\n")
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        
+        # [NARRATE] ...
+        narrate_match = re.match(r'^\[NARRATE\]\s*(.*)', line, re.IGNORECASE)
+        if narrate_match:
+            text = narrate_match.group(1).strip()
+            # Collect continuation lines (no marker prefix)
+            while i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if not next_line or re.match(r'^\[(NARRATE|VOICE|MUSIC|SFX|BG_MUSIC|BG_SFX|PAUSE)', next_line, re.IGNORECASE):
+                    break
+                if next_line.startswith('"'):
+                    break
+                text += " " + next_line
+                i += 1
+            if text:
+                segments.append(Segment(kind="NARRATE", text=text))
+            i += 1
+            continue
+        
+        # [VOICE: "CharName" | description]
+        voice_match = re.match(
+            r'^\[VOICE:\s*"([^"]+)"\s*\|\s*(.*?)\]',
+            line, re.IGNORECASE
+        )
+        if voice_match:
+            current_character = voice_match.group(1).strip()
+            current_voice_desc = voice_match.group(2).strip()
+            i += 1
+            continue
+        
+        # [MUSIC: prompt, Ns]
+        music_match = re.match(
+            r'^\[MUSIC:\s*(.*?),\s*(\d+)s?\]',
+            line, re.IGNORECASE
+        )
+        if music_match:
+            prompt = music_match.group(1).strip()
+            dur = int(music_match.group(2))
+            segments.append(Segment(kind="MUSIC", text=prompt, duration=dur))
+            i += 1
+            continue
+        
+        # [SFX: prompt, Ns]
+        sfx_match = re.match(
+            r'^\[SFX:\s*(.*?),\s*(\d+)s?\]',
+            line, re.IGNORECASE
+        )
+        if sfx_match:
+            prompt = sfx_match.group(1).strip()
+            dur = int(sfx_match.group(2))
+            segments.append(Segment(kind="SFX", text=prompt, duration=max(dur, 1)))
+            i += 1
+            continue
+        
+        # [BG_MUSIC: prompt, Ns] — background music layer
+        bg_music_match = re.match(
+            r'^\[BG_MUSIC:\s*(.*?),\s*(\d+)s?\]',
+            line, re.IGNORECASE
+        )
+        if bg_music_match:
+            prompt = bg_music_match.group(1).strip()
+            dur = min(int(bg_music_match.group(2)), 30)  # Hard cap: 30s max
+            segments.append(Segment(kind="BG_MUSIC", text=prompt, duration=dur))
+            i += 1
+            continue
+        
+        # [BG_SFX: prompt, Ns] — ambient SFX layer
+        bg_sfx_match = re.match(
+            r'^\[BG_SFX:\s*(.*?),\s*(\d+)s?\]',
+            line, re.IGNORECASE
+        )
+        if bg_sfx_match:
+            prompt = bg_sfx_match.group(1).strip()
+            dur = min(int(bg_sfx_match.group(2)), 15)  # Hard cap: 15s max
+            segments.append(Segment(kind="BG_SFX", text=prompt, duration=max(dur, 1)))
+            i += 1
+            continue
+        
+        # [PAUSE: Ns]
+        pause_match = re.match(r'^\[PAUSE:\s*(\d+\.?\d*)s?\]', line, re.IGNORECASE)
+        if pause_match:
+            dur = float(pause_match.group(1))
+            segments.append(Segment(kind="PAUSE", duration=dur))
+            i += 1
+            continue
+        
+        # "Dialogue line" — assigned to current_character
+        if line.startswith('"'):
+            # Extract quoted text, may span multiple lines
+            dialogue = line
+            while not dialogue.rstrip().endswith('"') and i + 1 < len(lines):
+                i += 1
+                dialogue += " " + lines[i].strip()
+            
+            # Strip outer quotes
+            dialogue = dialogue.strip().strip('"').strip()
+            
+            if dialogue and current_character:
+                segments.append(Segment(
+                    kind="VOICE",
+                    text=dialogue,
+                    character=current_character,
+                    voice_desc=current_voice_desc,
+                ))
+            elif dialogue:
+                # No character declared yet — treat as narration
+                segments.append(Segment(kind="NARRATE", text=dialogue))
+            i += 1
+            continue
+        
+        # Untagged text — treat as narration
+        segments.append(Segment(kind="NARRATE", text=line))
+        i += 1
+    
+    return segments
+
+
+# ──────────────────────────────────────────────────────────────
+#  Text Chunker (for long narration/dialogue)
+# ──────────────────────────────────────────────────────────────
+
+def chunk_text(text: str, max_chars: int = 400) -> list[str]:
+    """
+    Split long text into TTS-friendly chunks at sentence boundaries.
+    
+    Args:
+        text: The full text to chunk
+        max_chars: Max characters per chunk (TTS models degrade beyond ~500)
+    
+    Returns:
+        List of text chunks, each ≤ max_chars
+    """
+    if len(text) <= max_chars:
+        return [text]
+    
+    # Split on sentence-ending punctuation
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    chunks = []
+    current = ""
+    
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 > max_chars and current:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = current + " " + sentence if current else sentence
+    
+    if current.strip():
+        chunks.append(current.strip())
+    
+    # Safety: if any chunk is still too long, force-split at word boundaries
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            final_chunks.append(chunk)
+        else:
+            words = chunk.split()
+            sub = ""
+            for word in words:
+                # If a single word is longer than max_chars, split it by characters
+                if len(word) > max_chars:
+                    if sub:
+                        final_chunks.append(sub.strip())
+                        sub = ""
+                    for i in range(0, len(word), max_chars):
+                        final_chunks.append(word[i:i+max_chars])
+                    continue
+                
+                if len(sub) + len(word) + 1 > max_chars and sub:
+                    final_chunks.append(sub.strip())
+                    sub = word
+                else:
+                    sub = sub + " " + word if sub else word
+            if sub.strip():
+                final_chunks.append(sub.strip())
+    
+    return final_chunks
+
+
+# ──────────────────────────────────────────────────────────────
+#  Audio Helpers
+# ──────────────────────────────────────────────────────────────
+
+def generate_silence(duration_sec: float, sample_rate: int = 24000) -> np.ndarray:
+    """Generate a silent audio segment."""
+    return np.zeros(int(duration_sec * sample_rate), dtype=np.float32)
+
+
+def normalize_audio(audio: np.ndarray, target_db: float = -20.0) -> np.ndarray:
+    """Normalize audio to a target dB level for consistent volume."""
+    if len(audio) == 0:
+        return audio
+    
+    rms = np.sqrt(np.mean(audio ** 2))
+    if rms == 0:
+        return audio
+    
+    current_db = 20 * np.log10(rms)
+    gain = 10 ** ((target_db - current_db) / 20)
+    
+    # Clip to prevent distortion
+    normalized = audio * gain
+    return np.clip(normalized, -1.0, 1.0)
+
+
+# Maximum samples in any single array (~500MB at float32 = ~1.4 hours at 24kHz)
+MAX_SAMPLES = 125_000_000
+
+
+def overlay_audio(base: np.ndarray, overlay: np.ndarray, offset: int = 0) -> np.ndarray:
+    """
+    Mix overlay audio on top of base audio at the given sample offset.
+    
+    If the overlay extends beyond the base, the base is extended with silence.
+    Both signals are summed and clipped to [-1, 1].
+    """
+    # Safety: cap offset to prevent insane allocations
+    if offset < 0:
+        offset = 0
+    
+    needed_length = offset + len(overlay)
+    
+    # Memory safety: refuse to allocate arrays that would exceed ~500MB
+    if needed_length > MAX_SAMPLES:
+        logger.warning(
+            f"overlay_audio: needed_length {needed_length} exceeds MAX_SAMPLES {MAX_SAMPLES}, "
+            f"truncating overlay to fit."
+        )
+        # Truncate the overlay so it fits within the cap
+        max_overlay = MAX_SAMPLES - offset
+        if max_overlay <= 0:
+            return base  # offset already at the cap, skip this overlay
+        overlay = overlay[:max_overlay]
+        needed_length = offset + len(overlay)
+    
+    # Ensure base is long enough
+    if needed_length > len(base):
+        base = np.concatenate([base, np.zeros(needed_length - len(base), dtype=np.float32)])
+    
+    # Mix by addition
+    base[offset:offset + len(overlay)] += overlay
+    
+    # Clip to prevent distortion
+    return np.clip(base, -1.0, 1.0)
+
+
+# ──────────────────────────────────────────────────────────────
+#  Audiobook Producer
+# ──────────────────────────────────────────────────────────────
+
+class AudiobookProducer:
+    """Orchestrates audiobook generation."""
+    OUTPUT_SR = 24000
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self._voice_cache: dict[str, str] = {}
+        self._voice_cache_dir: str = ""
+        
+        # Audio budgets
+        self.MAX_SEGMENTS = 30
+        self.MAX_FG_SAMPLES = 60 * 60 * self.OUTPUT_SR  # 60 mins
+        self.MAX_BG_LAYERS = 20       # Ensures consistent voices throughout the audiobook
+        self._voice_cache: dict[str, str] = {}
+        self._voice_cache_dir: Optional[str] = None
+    
+    async def produce(self, script: str, output_path: str, title: str = "Audiobook") -> str:
+        """
+        Produce a full audiobook from a marked-up script.
+        
+        Args:
+            script: The marked-up audiobook script
+            output_path: Where to save the final MP3
+            title: Title for logging
+        
+        Returns:
+            Path to the final MP3 file
+        """
+        logger.info(f"Starting audiobook production: '{title}'")
+        start_time = time.time()
+        
+        # Set up voice cache directory
+        cache_dir = Path(output_path).parent / ".voice_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._voice_cache_dir = str(cache_dir)
+        self._voice_cache.clear()
+        
+        # Parse script
+        segments = parse_script(script)
+        logger.info(f"Parsed {len(segments)} segments from script")
+        
+        if not segments:
+            return "Error: Script produced no segments. Check format."
+        
+        # Hard cap: max segments — prevents massive memory usage on long scripts
+        if len(segments) > self.MAX_SEGMENTS:
+            logger.warning(f"Script has {len(segments)} segments, capping to {self.MAX_SEGMENTS}")
+            segments = segments[:self.MAX_SEGMENTS]
+        
+        # ── Pass 1: Render all segments ──────────────────────
+        # Foreground segments get concatenated sequentially.
+        # Background segments (BG_MUSIC, BG_SFX) are rendered separately
+        # and mixed under the foreground at the correct timeline position.
+        
+        foreground_clips: list[np.ndarray] = []
+        # Each bg entry: (start_sample, audio_array)
+        background_layers: list[tuple[int, np.ndarray]] = []
+        current_sample = 0  # Timeline cursor (in samples)
+        total_fg_samples = 0  # Running total for memory budget
+        
+        # Memory budget: cap at ~60 min of audio at OUTPUT_SR (float32)
+        for i, seg in enumerate(segments):
+            logger.info(f"Processing segment {i+1}/{len(segments)}: {seg.kind} — {seg.text[:50] if seg.text else seg.character}...")
+            
+            # ── VRAM Residency Management ──
+            # Explicitly signal transitions to prevent memory fragmentation
+            try:
+                from src.lobes.creative.generators import get_generator
+                gen = get_generator(user_id=None)
+                if seg.kind in ("MUSIC", "SFX", "BG_MUSIC", "BG_SFX"):
+                    gen.set_residency("musicgen")
+                elif seg.kind == "VOICE":
+                    gen.set_residency("tts")
+                # Kokoro (NARRATE) is light, but clearing for 'none' helps recovery
+                elif seg.kind == "NARRATE":
+                    gen.set_residency(None)
+            except Exception as e:
+                logger.debug(f"Residency signal failed: {e}")
+            
+            # Memory budget check
+            if total_fg_samples >= self.MAX_FG_SAMPLES:
+                logger.warning(f"Audiobook memory budget exceeded ({total_fg_samples/self.OUTPUT_SR/60:.1f} min). Stopping at segment {i+1}.")
+                break
+            
+            try:
+                if seg.kind in ("BG_MUSIC", "BG_SFX"):
+                    # Background layer — render and store with timeline position
+                    if len(background_layers) >= self.MAX_BG_LAYERS:
+                        logger.warning(f"Max BG layers ({self.MAX_BG_LAYERS}) reached, skipping.")
+                        continue
+                    bg_clip = await self._render_bg_segment(seg)
+                    if bg_clip is not None and len(bg_clip) > 0:
+                        background_layers.append((current_sample, bg_clip))
+                        logger.info(f"BG layer queued at {current_sample/self.OUTPUT_SR:.1f}s ({len(bg_clip)/self.OUTPUT_SR:.1f}s duration)")
+                else:
+                    # Foreground segment — rendered and added to timeline
+                    clip = await self._render_segment(seg)
+                    if clip is not None and len(clip) > 0:
+                        foreground_clips.append(clip)
+                        current_sample += len(clip)
+                        total_fg_samples += len(clip)
+            except Exception as e:
+                logger.error(f"Segment {i+1} failed ({seg.kind}): {e}")
+                silence = generate_silence(0.5, self.OUTPUT_SR)
+                foreground_clips.append(silence)
+                current_sample += len(silence)
+                total_fg_samples += len(silence)
+        
+        # ── Unload MusicGen after all audio segments are done ──
+        try:
+            from src.lobes.creative.generators import get_generator
+            gen = get_generator(user_id=None)
+            gen.unload_musicgen()
+        except Exception as e:
+            logger.warning(f"Suppressed {type(e).__name__}: {e}")
+        
+        if not foreground_clips:
+            return "Error: No audio segments were generated."
+        
+        # ── Pass 2: Assemble with background mixing ──────────
+        logger.info(f"Assembling final audiobook ({total_fg_samples/self.OUTPUT_SR/60:.1f} min foreground)...")
+        final_audio = np.concatenate(foreground_clips)
+        
+        # Free clip list to reduce peak memory
+        del foreground_clips
+        
+        # Mix in background layers
+        if background_layers:
+            logger.info(f"Mixing {len(background_layers)} background layer(s)...")
+            for bg_offset, bg_audio in background_layers:
+                final_audio = overlay_audio(final_audio, bg_audio, offset=bg_offset)
+        
+        # Free BG layers
+        del background_layers
+        
+        # Normalize overall volume
+        final_audio = normalize_audio(final_audio, target_db=-18.0)
+        
+        # Save as WAV first
+        wav_path = output_path.rsplit(".", 1)[0] + ".wav" if "." in output_path else output_path + ".wav"
+        sf.write(wav_path, final_audio, self.OUTPUT_SR)
+        
+        # Convert to MP3
+        from src.lobes.creative.audio_utils import wav_to_mp3
+        final_path = wav_to_mp3(wav_path, bitrate="192k")
+        
+        elapsed = time.time() - start_time
+        duration_min = len(final_audio) / self.OUTPUT_SR / 60
+        logger.info(f"Audiobook complete: {final_path} — {duration_min:.1f} min audio, produced in {elapsed:.0f}s")
+        
+        # Clean up voice cache
+        self._cleanup_voice_cache()
+        
+        return final_path
+    
+    # ── Segment Renderers ────────────────────────────────────
+    
+    async def _render_segment(self, seg: Segment) -> Optional[np.ndarray]:
+        """Route a segment to the appropriate engine and return raw audio."""
+        
+        if seg.kind == "NARRATE":
+            return await self._render_narration(seg.text)
+        
+        elif seg.kind == "VOICE":
+            return await self._render_dialogue(seg.text, seg.character, seg.voice_desc)
+        
+        elif seg.kind == "MUSIC":
+            return await self._render_music(seg.text, seg.duration)
+        
+        elif seg.kind == "SFX":
+            return await self._render_sfx(seg.text, seg.duration)
+        
+        elif seg.kind == "PAUSE":
+            return generate_silence(seg.duration, self.OUTPUT_SR)
+        
+        return None
+    
+    async def _render_bg_segment(self, seg: Segment) -> Optional[np.ndarray]:
+        """Render a background audio segment (BG_MUSIC or BG_SFX) at reduced volume."""
+        if seg.kind == "BG_MUSIC":
+            audio = await self._render_music(seg.text, seg.duration)
+            # Background music is quiet — mixed under speech
+            return normalize_audio(audio, target_db=-30.0)
+        elif seg.kind == "BG_SFX":
+            audio = await self._render_sfx(seg.text, seg.duration)
+            return normalize_audio(audio, target_db=-32.0)
+    
+    async def _render_narration(self, text: str) -> np.ndarray:
+        """Render narration using Kokoro (Ernos's voice)."""
+        from src.voice.synthesizer import AudioSynthesizer
+        
+        chunks = chunk_text(text, max_chars=400)
+        all_audio = []
+        
+        # Get or create synthesizer
+        synth = self.bot.voice_manager.synthesizer if hasattr(self.bot, 'voice_manager') and self.bot.voice_manager else AudioSynthesizer()
+        
+        for chunk in chunks:
+            if not synth.kokoro:
+                logger.warning("Kokoro not available — falling back to Qwen3-TTS for narration")
+                return await self._render_dialogue(text, "__narrator__", "A warm, clear narrator's voice")
+            
+            try:
+                samples, sample_rate = await asyncio.to_thread(
+                    synth.kokoro.create,
+                    synth._sanitize_text(chunk),
+                    voice="am_michael",
+                    speed=0.95,  # Slightly slower for audiobook narration
+                    lang="en-us"
+                )
+                
+                # Resample to OUTPUT_SR if needed
+                audio = self._resample(samples, sample_rate, self.OUTPUT_SR)
+                all_audio.append(audio)
+                
+                # Short pause between sentences
+                all_audio.append(generate_silence(0.15, self.OUTPUT_SR))
+                
+            except Exception as e:
+                logger.error(f"Kokoro narration chunk failed: {e}")
+        
+        if not all_audio:
+            return generate_silence(0.5, self.OUTPUT_SR)
+        
+        result = np.concatenate(all_audio)
+        # Add natural pause after narration block
+        result = np.concatenate([result, generate_silence(0.3, self.OUTPUT_SR)])
+        return normalize_audio(result, target_db=-20.0)
+    
+    async def _render_dialogue(self, text: str, character: str, voice_desc: str) -> np.ndarray:
+        """
+        Render character dialogue using Qwen3-TTS.
+        
+        Voice consistency: First occurrence → VoiceDesign (creates unique voice)
+        → saves reference clip. All subsequent lines → VoiceClone with saved clip.
+        """
+        from src.lobes.creative.generators import get_generator
+        
+        generator = get_generator(user_id=None)  # Local generator
+        chunks = chunk_text(text, max_chars=400)
+        all_audio = []
+        
+        for chunk in chunks:
+            tmp_path = os.path.join(
+                self._voice_cache_dir,
+                f"seg_{character}_{int(time.time() * 1000)}.wav"
+            )
+            
+            if character in self._voice_cache:
+                # ─── Consistent voice: Clone from cached reference ───
+                ref_clip = self._voice_cache[character]
+                audio_path = await asyncio.to_thread(
+                    generator.generate_speech,
+                    chunk, tmp_path,
+                    voice="",
+                    instruct="",
+                    mode="clone",
+                    ref_audio=ref_clip,
+                    ref_text=chunk,  # Qwen3-TTS uses this for alignment
+                )
+            else:
+                # ─── First occurrence: Design unique voice ───
+                # Save a copy of the WAV BEFORE mp3 conversion for voice caching
+                ref_path = os.path.join(self._voice_cache_dir, f"ref_{character}.wav")
+                
+                # Generate to a temp path — we'll copy before mp3 conversion eats the WAV
+                import shutil
+                pre_convert_wav = tmp_path  # generate_speech writes WAV here first
+                
+                audio_path = await asyncio.to_thread(
+                    generator.generate_speech,
+                    chunk, tmp_path,
+                    voice="",
+                    instruct=voice_desc or "A clear, natural speaking voice.",
+                    mode="design",
+                )
+                
+                # Cache the generated voice for future cloning
+                # Reuse the SAME audio — no second VoiceDesign call needed
+                try:
+                    if audio_path and os.path.exists(audio_path):
+                        # audio_path is mp3 after conversion; use it as reference
+                        self._voice_cache[character] = audio_path
+                        # If the original WAV still exists, prefer it (lossless)
+                        if os.path.exists(pre_convert_wav) and pre_convert_wav != audio_path:
+                            shutil.copy2(pre_convert_wav, ref_path)
+                            self._voice_cache[character] = ref_path
+                        logger.info(f"Voice cached for '{character}': {self._voice_cache[character]}")
+                except Exception as e:
+                    logger.warning(f"Voice cache failed for '{character}': {e}")
+                    # Still usable, just won't be consistent
+            
+            # Read the generated audio
+            try:
+                # audio_path might be mp3 — read whatever was produced
+                if audio_path and os.path.exists(audio_path):
+                    data, sr = sf.read(audio_path)
+                    audio = self._resample(data.astype(np.float32), sr, self.OUTPUT_SR)
+                    all_audio.append(audio)
+                    all_audio.append(generate_silence(0.1, self.OUTPUT_SR))
+                    
+                    # Clean up temp file
+                    try:
+                        os.remove(audio_path)
+                    except OSError as e:
+                        logger.warning(f"Suppressed {type(e).__name__}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to read dialogue audio: {e}")
+        
+        if not all_audio:
+            return generate_silence(0.5, self.OUTPUT_SR)
+        
+        result = np.concatenate(all_audio)
+        result = np.concatenate([result, generate_silence(0.3, self.OUTPUT_SR)])
+        return normalize_audio(result, target_db=-18.0)  # Dialogue slightly louder
+    
+    async def _render_music(self, prompt: str, duration: float) -> np.ndarray:
+        """Render background music using MusicGen."""
+        from src.lobes.creative.generators import get_generator
+        
+        generator = get_generator(user_id=None)
+        tmp_path = os.path.join(
+            self._voice_cache_dir,
+            f"music_{int(time.time() * 1000)}.wav"
+        )
+        
+        # Hard cap: 30s max — MusicGen Large eats massive memory for longer durations
+        safe_duration = int(min(duration, 30))
+        
+        try:
+            audio_path = await asyncio.to_thread(
+                generator.generate_music,
+                prompt, tmp_path,
+                safe_duration,
+            )
+            
+            if audio_path and os.path.exists(audio_path):
+                data, sr = sf.read(audio_path)
+                audio = self._resample(data.astype(np.float32), sr, self.OUTPUT_SR)
+                
+                # Music is quieter than speech (background level)
+                audio = normalize_audio(audio, target_db=-28.0)
+                
+                try:
+                    os.remove(audio_path)
+                except OSError as e:
+                    logger.warning(f"Suppressed {type(e).__name__}: {e}")
+                
+                return audio
+                
+        except Exception as e:
+            logger.error(f"Music generation failed: {e}")
+        
+        return generate_silence(duration, self.OUTPUT_SR)
+    
+    async def _render_sfx(self, prompt: str, duration: float) -> np.ndarray:
+        """Render sound effect using MusicGen (short clip)."""
+        # SFX uses MusicGen with short duration and specific prompt styling
+        sfx_prompt = f"sound effect: {prompt}, foley, cinematic"
+        return await self._render_music(sfx_prompt, max(duration, 1))
+    
+    # ── Utility Methods ──────────────────────────────────────
+    
+    def _resample(self, audio: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
+        """Resample audio to target sample rate using linear interpolation."""
+        if from_sr == to_sr:
+            return audio
+        
+        # Handle stereo → mono
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        
+        ratio = to_sr / from_sr
+        new_length = int(len(audio) * ratio)
+        
+        indices = np.linspace(0, len(audio) - 1, new_length)
+        resampled = np.interp(indices, np.arange(len(audio)), audio)
+        
+        return resampled.astype(np.float32)
+    
+    def _cleanup_voice_cache(self):
+        """Clean up temporary voice cache files (keep references for potential re-use)."""
+        if not self._voice_cache_dir:
+            return
+        
+        try:
+            cache_dir = Path(self._voice_cache_dir)
+            for f in cache_dir.iterdir():
+                # Keep reference files (ref_*.wav), delete everything else
+                if not f.name.startswith("ref_"):
+                    try:
+                        f.unlink()
+                    except OSError as e:
+                        logger.warning(f"Suppressed {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.debug(f"Voice cache cleanup: {e}")

@@ -1,0 +1,14 @@
+Research Question: "{question}"
+
+Design a Scientific Experiment to answer this question.
+Structure the response as:
+
+0. **Premise Verification**: Check the scientific validity of the question's premise. If the premise is pseudo-scientific or false (e.g., "prove the earth is flat"), STOP and explain why. Do not proceed to experiment design.
+1. **Hypothesis**: Null and Alternative.
+2. **Variables**: Independent, Dependent, Controlled.
+3. **Materials**: Required datasets, tools, or simulations.
+4. **Procedure**: Step-by-step method.
+5. **Data Analysis**: Statistical tests to apply (e.g., T-Test, ANOVA, Regression).
+6. **Falsification Criteria**: What evidence would disprove the hypothesis?
+
+Be rigorous and academic.

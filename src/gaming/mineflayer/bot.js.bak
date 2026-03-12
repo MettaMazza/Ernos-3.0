@@ -1,0 +1,217 @@
+/**
+ * Mineflayer Bot — Entry Point
+ * 
+ * Slim entry point: creates the bot, wires events, dispatches IPC commands.
+ * All logic lives in dedicated modules.
+ */
+
+const mineflayer = require('mineflayer');
+const readline = require('readline');
+const visual = require('./visual');
+
+// === Core modules ===
+const shared = require('./shared');
+const { setupCombat, aggroPlayers } = require('./combat');
+const { setupAutonomy } = require('./autonomy');
+const mcdata = require('./lib/mcdata');
+
+// === Command modules ===
+const { cmdGoto, cmdFollow, cmdStopFollow, cmdFind, cmdExplore, cmdWander } = require('./commands/movement');
+const { cmdAttack, cmdEquip, cmdShield, cmdSleep, cmdWake, cmdEat } = require('./commands/combat_cmds');
+const { cmdCollect, cmdCraft, cmdSmelt, cmdStore, cmdTake } = require('./commands/resources');
+const { cmdFarm, cmdHarvest, cmdPlant, cmdFish } = require('./commands/farming');
+const {
+    cmdPlace, cmdProtect, cmdListProtectedZones,
+    cmdSaveLocation, cmdGotoLocation, cmdListLocations,
+    cmdCopyBuild, cmdBuild, cmdListBlueprints
+} = require('./commands/building');
+const {
+    cmdChat, cmdStatus, cmdFullState, cmdDisconnect, cmdGetScreenshot,
+    cmdDrop, cmdGive, cmdShare, cmdScan, cmdCoopMode
+} = require('./commands/social');
+const {
+    cmdLookAround, cmdMaintainStatus, cmdDefend,
+    cmdCollectDrops, cmdGetNearby, cmdGetTime, cmdAutoGear,
+    cmdAutoSleep, cmdPlaceTorch,
+    cmdExecutePredictiveChain, cmdStopPredictiveChain, cmdGetReflexLog
+} = require('./reflexes');
+
+// === Global crash handlers ===
+process.on('uncaughtException', (err) => {
+    console.error(`[FATAL] UNCAUGHT_EXCEPTION: ${err.message}`);
+    console.error(err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error(`[FATAL] UNHANDLED_REJECTION: ${reason}`);
+    if (reason && reason.stack) console.error(reason.stack);
+});
+process.on('exit', (code) => { console.error(`[FATAL] PROCESS_EXIT | code=${code}`); });
+process.on('SIGTERM', () => { console.error('[FATAL] SIGTERM received'); });
+process.on('SIGINT', () => { console.error('[FATAL] SIGINT received'); });
+
+// === Configuration ===
+const config = {
+    host: process.env.MC_HOST || 'localhost',
+    port: parseInt(process.env.MC_PORT) || 25565,
+    username: process.env.MC_USERNAME || 'Ernos',
+    version: process.env.MC_VERSION || null
+};
+
+// === Initialize bot ===
+function initBot() {
+    const bot = mineflayer.createBot(config);
+
+    bot.loadPlugin(shared.pathfinder);
+
+    // Load Mindcraft skill plugins
+    try { bot.loadPlugin(require('mineflayer-collectblock').plugin); } catch (e) { console.error('Plugin load warning (collectblock):', e.message); }
+    try { bot.loadPlugin(require('mineflayer-pvp').plugin); } catch (e) { console.error('Plugin load warning (pvp):', e.message); }
+    try { bot.loadPlugin(require('mineflayer-auto-eat').plugin); } catch (e) { console.error('Plugin load warning (auto-eat):', e.message); }
+    try { bot.loadPlugin(require('mineflayer-armor-manager')); } catch (e) { console.error('Plugin load warning (armor-manager):', e.message); }
+    try { bot.loadPlugin(require('mineflayer-tool').plugin); } catch (e) { console.error('Plugin load warning (tool):', e.message); }
+
+    // Store bot ref in shared state for all modules
+    shared.setBot(bot);
+
+    bot.once('spawn', () => {
+        const mcDataRaw = require('minecraft-data')(bot.version);
+        const { Vec3 } = require('vec3');
+        mcDataRaw.Vec3 = Vec3;  // Attach Vec3 so commands can use mcData.Vec3
+        shared.setMcData(mcDataRaw);
+
+        // Initialize Mindcraft mcdata module for skills.js
+        mcdata.initMcData(bot);
+
+        const movements = new shared.Movements(bot, mcDataRaw);
+        bot.pathfinder.setMovements(movements);
+
+        shared.mcLog('INFO', 'BOT_SPAWNED', { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z });
+        shared.sendEvent('spawn', { position: bot.entity.position });
+
+        // Spectate handling is done Python-side via _auto_spectate_client() AppleScript
+        // which targets only the local Mac Minecraft client, not other players
+
+        // Visual perception
+        visual.initViewer(bot).then(success => {
+            if (success) shared.sendEvent('visual_ready', {});
+        });
+    });
+
+    // Wire combat AI (health, entityHurt, proactive interval)
+    setupCombat(bot);
+
+    // Wire autonomy (auto-eat, death recovery)
+    setupAutonomy(bot);
+
+    // === Event handlers ===
+    let drowningPanic = false;
+    bot.on('breath', () => {
+        if (bot.oxygenLevel < 10 && !drowningPanic) {
+            shared.mcLog('WARNING', 'BOT_DROWNING_RECOVERY', { oxygen: bot.oxygenLevel });
+            bot.pathfinder.stop();
+            bot.clearControlStates();
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+            drowningPanic = true;
+        } else if (bot.oxygenLevel >= 18 && drowningPanic) {
+            bot.clearControlStates();
+            drowningPanic = false;
+        }
+    });
+    bot.on('death', () => {
+        shared.mcLog('WARNING', 'BOT_DIED');
+        shared.sendEvent('death', {});
+    });
+
+    bot.on('respawn', () => {
+        shared.mcLog('INFO', 'BOT_RESPAWNED');
+        shared.sendEvent('respawn', {});
+        // Spectate re-attach handled Python-side via _auto_spectate_client()
+    });
+
+    bot.on('chat', (username, message) => {
+        shared.mcLog('DEBUG', 'CHAT_RAW', { from: username, msg: message.substring(0, 50), bot_name: bot.username });
+        if (username !== bot.username) {
+            // Aggro clear on apology
+            const lowerMsg = message.toLowerCase();
+            if (aggroPlayers.has(username) && (lowerMsg.includes('sorry') || lowerMsg.includes('apolog'))) {
+                aggroPlayers.delete(username);
+                shared.mcLog('INFO', 'AGGRO_CLEARED', { player: username, reason: 'apology' });
+                shared.sendEvent('aggro_cleared', { username, message });
+            }
+
+            shared.mcLog('INFO', 'CHAT_FORWARDED', { username, message: message.substring(0, 50) });
+            shared.sendEvent('chat', { username, message });
+        } else {
+            shared.mcLog('DEBUG', 'CHAT_IGNORED_SELF', { username });
+        }
+    });
+
+    bot.on('error', (err) => {
+        shared.mcLog('ERROR', 'BOT_ERROR', { message: err.message });
+        shared.sendEvent('error', { message: err.message });
+    });
+
+    bot.on('kicked', (reason) => {
+        shared.sendEvent('kicked', { reason });
+    });
+}
+
+// === Command dispatch table ===
+const commands = {
+    // Movement
+    goto: cmdGoto, follow: cmdFollow, stop_follow: cmdStopFollow, find: cmdFind,
+    explore: cmdExplore, wander: cmdWander,
+    // Combat
+    attack: cmdAttack, equip: cmdEquip, shield: cmdShield,
+    sleep: cmdSleep, wake: cmdWake, eat: cmdEat,
+    // Resources
+    collect: cmdCollect, craft: cmdCraft, smelt: cmdSmelt,
+    store: cmdStore, take: cmdTake,
+    // Farming
+    farm: cmdFarm, harvest: cmdHarvest, plant: cmdPlant, fish: cmdFish,
+    // Building & Locations
+    place: cmdPlace, protect: cmdProtect, list_protected_zones: cmdListProtectedZones,
+    save_location: cmdSaveLocation, goto_location: cmdGotoLocation, list_locations: cmdListLocations,
+    copy_build: cmdCopyBuild, build: cmdBuild, list_blueprints: cmdListBlueprints,
+    // Social & Co-op
+    chat: cmdChat, status: cmdStatus, full_state: cmdFullState, disconnect: cmdDisconnect,
+    get_screenshot: cmdGetScreenshot,
+    drop: cmdDrop, give: cmdGive, share: cmdShare, scan: cmdScan, coop_mode: cmdCoopMode,
+    // Predictive chain
+    execute_predictive_chain: cmdExecutePredictiveChain,
+    stop_predictive_chain: cmdStopPredictiveChain,
+    get_reflex_log: cmdGetReflexLog,
+    // Reflexes
+    look_around: cmdLookAround, maintain_status: cmdMaintainStatus, defend: cmdDefend,
+    collect_drops: cmdCollectDrops, get_nearby: cmdGetNearby, get_time: cmdGetTime,
+    auto_gear: cmdAutoGear, auto_sleep: cmdAutoSleep, place_torch: cmdPlaceTorch
+};
+// Register all commands so precog can access them too
+shared.registerCommands(commands);
+
+// === IPC: stdin/stdout JSON protocol ===
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', async (line) => {
+    try {
+        const { id, command, params = {} } = JSON.parse(line);
+
+        if (!commands[command]) {
+            shared.send(id, false, null, `Unknown command: ${command}`);
+            return;
+        }
+
+        try {
+            const result = await commands[command](params);
+            shared.send(id, true, result);
+        } catch (err) {
+            shared.send(id, false, null, err.message);
+        }
+    } catch (err) {
+        console.error('IPC parse error:', err.message);
+    }
+});
+
+// Start
+initBot();

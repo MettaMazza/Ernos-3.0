@@ -1,0 +1,17 @@
+--- src/gaming/agent.py
++++ src/gaming/agent.py
+@@ -554,10 +554,13 @@
+                     
+                     # If LLM finished while chaining, prepend new actions
++                    print(f"[DEBUG] Check llm_task inside chain: {llm_task}, done? {llm_task.done() if llm_task else False}")
+                     if llm_task and llm_task.done():
++                        print("[DEBUG] llm_task IS DONE INSIDE CHAIN!")
+                         try:
+                             decision_tuple = llm_task.result()
+                             if not decision_tuple or len(decision_tuple) < 2:
+@@ -638,6 +641,7 @@
+                 
+                 # 4. If precog exhausted, wait for or trigger LLM
++                print(f"[DEBUG] Check llm_task inside wait loop: {llm_task}, done? {llm_task.done() if llm_task else False}")
+                 if llm_task and not llm_task.done():
+                     # While waiting for LLM, don't override active navigation goals

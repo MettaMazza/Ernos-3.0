@@ -1,0 +1,637 @@
+"""
+Coverage tests for src/tools/skill_admin_tools.py.
+Targets 158 uncovered lines across: _save_schedules, restore_schedules,
+reload_skills, list_proposals, approve_skill, schedule_skill,
+cancel_schedule, list_schedules.
+"""
+import pytest
+import json
+from pathlib import Path
+from unittest.mock import patch, MagicMock, AsyncMock
+
+
+# ── _save_schedules ──────────────────────────────────────
+class TestSaveSchedules:
+    def test_saves_skill_tasks(self, tmp_path):
+        from src.tools.skill_admin_tools import _save_schedules
+        schedules_file = tmp_path / "schedules.json"
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {
+            "skill_user1_global_news_9_0": {},
+            "system_task": {},  # non-skill, should be excluded
+        }
+        with patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            _save_schedules()
+        data = json.loads(schedules_file.read_text())
+        assert "skill_user1_global_news_9_0" in data
+        assert "system_task" not in data
+
+    def test_saves_with_channel_id(self, tmp_path):
+        from src.tools.skill_admin_tools import _save_schedules
+        schedules_file = tmp_path / "schedules.json"
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {
+            "skill_user1_1234567890123_digest_8_30": {},
+        }
+        with patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            _save_schedules()
+        data = json.loads(schedules_file.read_text())
+        entry = data["skill_user1_1234567890123_digest_8_30"]
+        assert entry["channel_id"] == "1234567890123"
+
+    def test_malformed_task_name(self, tmp_path):
+        from src.tools.skill_admin_tools import _save_schedules
+        schedules_file = tmp_path / "schedules.json"
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"skill_": {}}  # Too short, will fail parsing
+        with patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            _save_schedules()  # Should not raise
+
+    def test_save_schedules_exception(self, tmp_path):
+        from src.tools.skill_admin_tools import _save_schedules
+        schedules_file = tmp_path / "schedules.json"
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"skill_user1_global_news_9_0": {}}
+        
+        with patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("pathlib.Path.write_text", side_effect=Exception("Save fail")):
+            _save_schedules()
+
+
+# restore_schedules tests consolidated into tests/tools/test_schedule_persistence.py
+
+
+# ── reload_skills ────────────────────────────────────────
+class TestReloadSkills:
+    @pytest.mark.asyncio
+    async def test_no_bot(self):
+        from src.tools.skill_admin_tools import reload_skills
+        with patch("src.tools.skill_admin_tools.bot_globals") as mock_globals:
+            mock_globals.bot = None
+            result = await reload_skills()
+        assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_success(self, tmp_path):
+        from src.tools.skill_admin_tools import reload_skills
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.load_skills.return_value = 3
+        with patch("src.tools.skill_admin_tools.bot_globals") as mock_globals, \
+             patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            mock_globals.bot = mock_bot
+            result = await reload_skills()
+        assert "Core Skills: 3" in result
+
+    @pytest.mark.asyncio
+    async def test_reload_with_users(self, tmp_path):
+        from src.tools.skill_admin_tools import reload_skills
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.load_skills.return_value = 1
+        
+        users_dir = tmp_path / "users"
+        user1_dir = users_dir / "user1"
+        (user1_dir / "skills").mkdir(parents=True)
+        
+        with patch("src.tools.skill_admin_tools.bot_globals") as mock_globals, \
+             patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            mock_globals.bot = mock_bot
+            result = await reload_skills()
+        assert "User Skills: 1" in result
+
+    @pytest.mark.asyncio
+    async def test_reload_exception(self):
+        from src.tools.skill_admin_tools import reload_skills
+        with patch("src.tools.skill_admin_tools.bot_globals") as mock_globals, \
+             patch("src.tools.skill_admin_tools.data_dir", side_effect=Exception("Reload fail")):
+            mock_globals.bot = MagicMock()
+            result = await reload_skills()
+        assert "Error reloading" in result
+
+
+# ── list_proposals ───────────────────────────────────────
+class TestListProposals:
+    @pytest.mark.asyncio
+    async def test_no_dir(self, tmp_path):
+        from src.tools.skill_admin_tools import list_proposals
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            result = await list_proposals()
+        assert "No pending" in result
+
+    @pytest.mark.asyncio
+    async def test_with_proposals(self, tmp_path):
+        from src.tools.skill_admin_tools import list_proposals
+        pending = tmp_path / "pending"
+        pending.mkdir()
+        (pending / "skill1.md").write_text("# Skill 1")
+        (pending / "skill2.md").write_text("# Skill 2")
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            result = await list_proposals()
+        assert "skill1.md" in result
+        assert "skill2.md" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_dir(self, tmp_path):
+        from src.tools.skill_admin_tools import list_proposals
+        (tmp_path / "pending").mkdir()
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            result = await list_proposals()
+        assert "No pending" in result
+
+
+# ── approve_skill ────────────────────────────────────────
+class TestApproveSkill:
+    @pytest.mark.asyncio
+    async def test_not_found(self, tmp_path):
+        from src.tools.skill_admin_tools import approve_skill
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path):
+            result = await approve_skill("nonexistent")
+        assert "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_approve_core(self, tmp_path):
+        from src.tools.skill_admin_tools import approve_skill
+        pending = tmp_path / "pending"
+        pending.mkdir()
+        (pending / "myskill.md").write_text("# My Skill")
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path), \
+             patch("src.tools.skill_admin_tools.reload_skills", new_callable=AsyncMock, return_value="ok"):
+            result = await approve_skill("myskill.md", target_scope="CORE")
+        assert "Approved" in result
+
+    @pytest.mark.asyncio
+    async def test_approve_user_scope(self, tmp_path):
+        from src.tools.skill_admin_tools import approve_skill
+        pending = tmp_path / "pending"
+        pending.mkdir()
+        (pending / "userskill.md").write_text("# User Skill")
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path), \
+             patch("src.tools.skill_admin_tools.reload_skills", new_callable=AsyncMock, return_value="ok"):
+            result = await approve_skill("userskill.md", target_scope="user123")
+        assert "Approved" in result
+
+    @pytest.mark.asyncio
+    async def test_approve_exception(self, tmp_path):
+        from src.tools.skill_admin_tools import approve_skill
+        pending = tmp_path / "pending"
+        pending.mkdir()
+        (pending / "crash.md").write_text("# Crash")
+        with patch("src.tools.skill_admin_tools.data_dir", return_value=tmp_path), \
+             patch("shutil.move", side_effect=Exception("Move fail")):
+            result = await approve_skill("crash.md")
+        assert "Error approving" in result
+
+
+# ── schedule_skill ───────────────────────────────────────
+class TestScheduleSkill:
+    @pytest.mark.asyncio
+    async def test_no_bot(self):
+        from src.tools.skill_admin_tools import schedule_skill
+        with patch("src.tools.skill_admin_tools.bot_globals") as mock_globals:
+            mock_globals.bot = None
+            result = await schedule_skill("news", 9, 0)
+        assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_skill_not_found(self):
+        from src.tools.skill_admin_tools import schedule_skill
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.get_skill.return_value = None
+        with patch("src.bot.globals.bot", mock_bot), \
+             patch("src.tools.skill_admin_tools.reload_skills", new_callable=AsyncMock):
+            result = await schedule_skill("nonexistent", 9, 0, user_id="u1")
+        assert "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_schedule_success(self, tmp_path):
+        from src.tools.skill_admin_tools import schedule_skill
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.get_skill.return_value = {"name": "news"}
+        mock_scheduler = MagicMock()
+
+        schedules_file = tmp_path / "schedules.json"
+        with patch("src.bot.globals.bot", mock_bot), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+            result = await schedule_skill("news", 9, 0, user_id="u1")
+        assert "Scheduled" in result
+        mock_scheduler.add_daily_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_schedule_skill_json_decode_error(self, tmp_path):
+        from src.tools.skill_admin_tools import schedule_skill
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.get_skill.return_value = {"name": "news"}
+        mock_scheduler = MagicMock()
+
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text("invalid json") # Will trigger DecodeError
+
+        with patch("src.bot.globals.bot", mock_bot), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+            result = await schedule_skill("news", 9, 0, user_id="u1")
+        assert "Scheduled" in result
+
+    @pytest.mark.asyncio
+    async def test_schedule_skill_write_exception(self, tmp_path):
+        from src.tools.skill_admin_tools import schedule_skill
+        mock_bot = MagicMock()
+        mock_bot.skill_registry.get_skill.return_value = {"name": "news"}
+        mock_scheduler = MagicMock()
+
+        schedules_file = tmp_path / "schedules.json"
+
+        with patch("src.bot.globals.bot", mock_bot), \
+             patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("pathlib.Path.write_text", side_effect=Exception("Write fail")):
+            result = await schedule_skill("news", 9, 0, user_id="u1")
+        assert "Scheduled" in result
+
+
+# ── cancel_schedule ──────────────────────────────────────
+class TestCancelSchedule:
+    @pytest.mark.asyncio
+    async def test_not_found(self):
+        from src.tools.skill_admin_tools import cancel_schedule
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {}
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            result = await cancel_schedule("news", 9, 0, user_id="u1")
+        assert "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_cancel_success(self, tmp_path):
+        from src.tools.skill_admin_tools import cancel_schedule
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"skill_u1_global_news_9_0": {}}
+
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text(json.dumps({"skill_u1_global_news_9_0": {}}))
+
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+            result = await cancel_schedule("news", 9, 0, user_id="u1")
+        assert "Cancelled" in result
+        mock_scheduler.remove_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_fuzzy_match(self):
+        from src.tools.skill_admin_tools import cancel_schedule
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"skill_u1_1234567890123_news_9_0": {}}
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            result = await cancel_schedule("news", 9, 0, user_id="u1")
+        assert "Cancelled" in result
+
+    @pytest.mark.asyncio
+    async def test_cancel_exception(self, tmp_path):
+        from src.tools.skill_admin_tools import cancel_schedule
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"skill_u1_global_news_9_0": {}}
+
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text(json.dumps({"skill_u1_global_news_9_0": {}}))
+
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("pathlib.Path.write_text", side_effect=Exception("Cancel fail")):
+            result = await cancel_schedule("news", 9, 0, user_id="u1")
+        assert "Cancelled" in result
+
+
+# ── list_schedules ───────────────────────────────────────
+class TestListSchedules:
+    @pytest.mark.asyncio
+    async def test_no_tasks(self):
+        from src.tools.skill_admin_tools import list_schedules
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {}
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            result = await list_schedules()
+        assert "No scheduled" in result
+
+    @pytest.mark.asyncio
+    async def test_with_tasks(self, tmp_path):
+        from src.tools.skill_admin_tools import list_schedules
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {
+            "system_consolidation": {"hour": 3, "minute": 0},
+            "skill_u1_global_news_9_0": {"hour": 9, "minute": 0},
+        }
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text(json.dumps({"skill_u1_global_news_9_0": {}}))
+
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+            result = await list_schedules()
+        assert "System Tasks" in result
+        assert "Skill Schedules" in result
+
+    @pytest.mark.asyncio
+    async def test_unloaded_persisted(self, tmp_path):
+        from src.tools.skill_admin_tools import list_schedules
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"system_task": {"hour": 0, "minute": 0}}
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text(json.dumps({
+            "skill_u1_news_9_0": {},
+            "skill_u2_digest_8_30": {},
+        }))
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+            result = await list_schedules()
+        assert "not yet loaded" in result
+
+    @pytest.mark.asyncio
+    async def test_list_schedules_channel_id(self):
+        from src.tools.skill_admin_tools import list_schedules
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {
+            "skill_u1_1234567890123_news_9_0": {"hour": 9, "minute": 0}
+        }
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            result = await list_schedules()
+        assert "1234567890123" in result
+
+    @pytest.mark.asyncio
+    async def test_list_schedules_malformed_name(self):
+        from src.tools.skill_admin_tools import list_schedules
+        
+        class BadString(str):
+            def split(self, *args, **kwargs):
+                raise ValueError("Cannot split")
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {
+            BadString("skill_invalid"): {"hour": 9, "minute": 0}
+        }
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler):
+            result = await list_schedules()
+        assert "**skill_invalid**" in result
+
+    @pytest.mark.asyncio
+    async def test_list_schedules_exception_reading(self, tmp_path):
+        from src.tools.skill_admin_tools import list_schedules
+        mock_scheduler = MagicMock()
+        mock_scheduler._tasks = {"system_task": {"hour": 0, "minute": 0}}
+        schedules_file = tmp_path / "schedules.json"
+        schedules_file.write_text("{}") # File must exist to trigger inner read
+        
+        with patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+             patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file), \
+             patch("pathlib.Path.read_text", side_effect=Exception("Read fail")):
+            result = await list_schedules()
+        assert "system_task" in result
+
+
+# ── _execute_wrapped_skill ───────────────────────────────
+class TestExecuteWrappedSkill:
+    """Tests the dynamically injected scheduled method _execute_wrapped_skill inside schedule_skill."""
+    
+    @pytest.fixture
+    def setup_mocks(self, tmp_path):
+        import discord
+        from src.tools.skill_admin_tools import schedule_skill
+        
+        mock_bot = MagicMock()
+        mock_skill = {"name": "news"}
+        mock_bot.skill_registry.get_skill.return_value = mock_skill
+        mock_bot.skill_registry._skills = {"CORE": {"news": mock_skill}}
+        
+        mock_autonomy = AsyncMock()
+        mock_autonomy.run_task.return_value = "Task complete"
+        mock_creative = MagicMock()
+        mock_creative.get_ability.return_value = mock_autonomy
+        mock_bot.cerebrum.get_lobe.return_value = mock_creative
+        
+        mock_channel = AsyncMock()
+        mock_channel.send = AsyncMock()
+        mock_bot.get_channel.return_value = mock_channel
+        
+        schedules_file = tmp_path / "schedules.json"
+        
+        # Inject our coro capture directly
+        captured_coro_container = {}
+        mock_scheduler = MagicMock()
+        def mock_add(*args, **kwargs):
+            captured_coro_container["coro"] = kwargs.get("coro_func")
+        mock_scheduler.add_daily_task.side_effect = mock_add
+
+        async def get_coro(skill_name="news", user_id="1", channel_id="123"):
+            with patch("src.bot.globals.bot", mock_bot), \
+                 patch("src.scheduler.get_scheduler", return_value=mock_scheduler), \
+                 patch("src.tools.skill_admin_tools.SCHEDULES_FILE", schedules_file):
+                await schedule_skill(skill_name, 9, 0, user_id=user_id, channel_id=channel_id)
+            return captured_coro_container.get("coro")
+            
+        return mock_bot, mock_autonomy, mock_channel, get_coro, tmp_path
+
+    @pytest.mark.asyncio
+    async def test_full_success_path(self, setup_mocks):
+        mock_bot, mock_autonomy, mock_channel, get_coro, tmp_path = setup_mocks
+        coro = await get_coro()
+        
+        user_skills_dir = tmp_path / "memory" / "users" / "u1" / "skills"
+        user_skills_dir.mkdir(parents=True)
+        mock_bot.skill_registry.load_skills.return_value = 1
+        
+        # Also mock extract_files to return a valid dummy file
+        dummy_file = tmp_path / "dummy.pdf"
+        dummy_file.write_text("dummy")
+        
+        with patch("src.engines.cognition_retry.extract_files", return_value=[str(dummy_file)]), \
+             patch("src.ui.views.ResponseFeedbackView", return_value=MagicMock()), \
+             patch("discord.File") as mock_discord_file:
+            await coro()
+        
+        mock_autonomy.run_task.assert_awaited_once()
+        assert mock_channel.send.await_count >= 2 # Header + chunk
+        mock_discord_file.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_search_all_scopes(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        # Pass the outer gate check, fail the inner gate check
+        mock_bot.skill_registry.get_skill.side_effect = [True, None]
+        mock_bot.skill_registry._skills = {"OTHER": {"news": {"name": "news"}}}
+        
+        coro = await get_coro()
+        await coro()
+        
+    @pytest.mark.asyncio
+    async def test_skill_completely_missing(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        # Pass outer gate, fail inner gate AND fallback
+        mock_bot.skill_registry.get_skill.side_effect = [True, None]
+        mock_bot.skill_registry._skills = {}
+        
+        coro = await get_coro()
+        await coro() # returns early
+
+    @pytest.mark.asyncio
+    async def test_missing_lobes(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        coro = await get_coro()
+        
+        # Creative Lobe missing
+        mock_bot.cerebrum.get_lobe.return_value = None
+        await coro()
+        
+        # Autonomy Ability missing
+        mock_creative = MagicMock()
+        mock_creative.get_ability.return_value = None
+        mock_bot.cerebrum.get_lobe.return_value = mock_creative
+        await coro()
+
+    @pytest.mark.asyncio
+    async def test_channel_resolution_exceptions(self, setup_mocks):
+        import discord
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        # Need to ensure get_skill passes to get a valid coro
+        mock_bot.skill_registry.get_skill.return_value = True
+        coro = await get_coro(channel_id="invalid_int")
+        
+        # Invalid int causes Exception at cid = int(channel_id)
+        # Sets is_private_origin = True. Then attempts bot.fetch_user()
+        mock_dm_channel = AsyncMock()
+        mock_user = MagicMock()
+        mock_user.create_dm = AsyncMock(return_value=mock_dm_channel)
+        mock_bot.fetch_user = AsyncMock(return_value=mock_user)
+        
+        await coro()
+        mock_dm_channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_channel_resolution_dm_fallback_exception(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        coro = await get_coro(channel_id="invalid")
+        
+        # User fetch throws exception
+        mock_bot.fetch_user.side_effect = Exception("User fetch fail")
+        await coro()
+
+    @pytest.mark.asyncio
+    async def test_public_channel_fallback(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        mock_bot.skill_registry.get_skill.return_value = True
+        coro = await get_coro(channel_id=None, user_id=None) # NO private origin
+        
+        mock_bot.get_channel.return_value = None
+        mock_fallback_channel = AsyncMock()
+        mock_bot.fetch_channel = AsyncMock(return_value=mock_fallback_channel)
+        
+        with patch("config.settings.SCHEDULED_TASKS_CHANNEL_ID", 999):
+            await coro()
+        mock_fallback_channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_public_channel_fallback_exception(self, setup_mocks):
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        coro = await get_coro(channel_id=None, user_id=None)
+        
+        mock_bot.get_channel.return_value = None
+        mock_bot.fetch_channel.side_effect = Exception("Fetch fail")
+        
+        with patch("config.settings.SCHEDULED_TASKS_CHANNEL_ID", 999):
+            await coro() # Hits 'No valid channel found' 
+
+    @pytest.mark.asyncio
+    async def test_admin_scheduled_skill_public_override(self, setup_mocks):
+        import discord
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        mock_bot.skill_registry.get_skill.return_value = True
+        
+        # Origin is a public text channel (12345)
+        coro = await get_coro(channel_id="12345")
+        
+        # Mock the origin channel as a TextChannel
+        mock_public_channel = MagicMock(spec=discord.TextChannel)
+        mock_bot.get_channel.side_effect = lambda cid: mock_public_channel if cid == 12345 else None
+        
+        # Mock the specific admin fallback channel
+        mock_admin_channel = AsyncMock()
+        mock_bot.fetch_channel = AsyncMock(side_effect=lambda cid: mock_admin_channel if cid == 1472985465832603803 else None)
+        
+        await coro()
+        
+        # It must fetch the admin channel and send to it
+        mock_bot.fetch_channel.assert_awaited_with(1472985465832603803)
+        mock_admin_channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_admin_scheduled_skill_private_dm_stays(self, setup_mocks):
+        import discord
+        mock_bot, _, _, get_coro, _ = setup_mocks
+        mock_bot.skill_registry.get_skill.return_value = True
+        
+        # Origin is a private DM channel (99999)
+        coro = await get_coro(channel_id="99999")
+        
+        # Mock the origin channel as a DMChannel
+        mock_dm_channel = AsyncMock(spec=discord.DMChannel)
+        mock_bot.get_channel.side_effect = lambda cid: mock_dm_channel if cid == 99999 else None
+        
+        await coro()
+        
+        # It must use the private origin DM and NOT fallback/fetch the admin channel
+        mock_dm_channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_file_extraction_exception(self, setup_mocks):
+        _, mock_autonomy, mock_channel, get_coro, _ = setup_mocks
+        coro = await get_coro()
+        
+        with patch("src.engines.cognition_retry.extract_files", side_effect=Exception("Extract fail")), \
+             patch("src.ui.views.ResponseFeedbackView", return_value=MagicMock()):
+            await coro()
+            
+    @pytest.mark.asyncio
+    async def test_feedback_view_exception(self, setup_mocks):
+        _, _, _, get_coro, _ = setup_mocks
+        coro = await get_coro()
+        
+        with patch("src.engines.cognition_retry.extract_files", return_value=[]), \
+             patch("src.ui.views.ResponseFeedbackView", side_effect=Exception("View fail")):
+            await coro()
+
+    @pytest.mark.asyncio
+    async def test_chunking_and_send_exceptions(self, setup_mocks):
+        _, mock_autonomy, mock_channel, get_coro, _ = setup_mocks
+        coro = await get_coro()
+        
+        # Result > 4000 chars
+        mock_autonomy.run_task.return_value = "A" * 5000
+        
+        # Make chunk send fail on the first long chunk (i.e. second send overall after header)
+        mock_channel.send.side_effect = [None, Exception("Chunk send fail")]
+        
+        with patch("src.engines.cognition_retry.extract_files", return_value=[]), \
+             patch("src.ui.views.ResponseFeedbackView", return_value=None):
+            await coro()
+
+    @pytest.mark.asyncio
+    async def test_outer_try_except_error(self, setup_mocks):
+        _, mock_autonomy, mock_channel, get_coro, _ = setup_mocks
+        coro = await get_coro()
+        
+        # Outer try/except handles any general channel err. Make the header send fail
+        mock_channel.send.side_effect = Exception("Header send fail")
+        
+        with patch("src.engines.cognition_retry.extract_files", return_value=[]), \
+             patch("src.ui.views.ResponseFeedbackView", return_value=None):
+            await coro()
+
+    @pytest.mark.asyncio
+    async def test_top_level_wrapper_exception(self, setup_mocks):
+        mock_bot, _, _, get_coro, tmp_path = setup_mocks
+        coro = await get_coro()
+        
+        # Easiest way to hit the outermost generic wrapper exception is to trick
+        # the user skills existence check into throwing by patching exists
+        with patch("pathlib.Path.exists", side_effect=Exception("Catastrophic")):
+            await coro()

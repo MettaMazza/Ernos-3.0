@@ -1,0 +1,47 @@
+# ─── Docker Build Ignore ───
+# Exclude files/dirs that should NOT be in the image
+
+# User data (mounted as volume)
+memory/
+data/
+
+# Development files
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment (secrets — user provides their own)
+.env
+.env.local
+
+# Tests (not needed in production image)
+tests/
+
+# Documentation
+docs/
+*.md
+!requirements.txt
+
+# Models (mounted as volume)
+models/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build/deploy scripts
+build_image.sh
+start_docker.sh
+start_ernos.sh
+docker-compose.yml

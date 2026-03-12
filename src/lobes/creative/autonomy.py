@@ -1,0 +1,845 @@
+from ..base import BaseAbility
+import logging
+import asyncio
+from config import settings
+import time
+import re
+from src.tools.registry import ToolRegistry
+import os
+import datetime
+import discord
+from pathlib import Path
+from src.core.data_paths import data_dir
+
+logger = logging.getLogger("Lobe.Creative.Autonomy")
+
+class AutonomyAbility(BaseAbility):
+    """
+    Autonomy Agent - The conscious thought stream and autonomous action loop.
+    The conscious thought stream and autonomous action loop.
+    """
+    def __init__(self, lobe):
+        super().__init__(lobe)
+        self.is_running = False
+        self.last_summary_time = time.time()
+        self.autonomy_log_buffer = [] 
+        self.summary_channel_id = 1468579019766366280
+
+    async def execute(self, instruction: str = None) -> str:
+        """
+        Start the autonomy loop OR perform a one-shot dream/introspection.
+        """
+        if instruction:
+            return await self._one_shot_dream(instruction)
+
+        if self.is_running:
+            return "Autonomy Loop already active."
+        
+        self.is_running = True
+        self.last_summary_time = time.time()
+        
+        logger.info("Autonomy Loop STARTED (T-45s to Idle)")
+        logger.critical("Autonomy Loop STARTED (Continuous Entity Mode).")
+        
+        try:
+            while self.is_running:
+                # Autonomy Lite: check much less frequently to save API calls
+                loop_interval = 120 if getattr(settings, 'AUTONOMY_LITE_MODE', False) else 10
+                await asyncio.sleep(loop_interval)
+                
+                # 0. Transparency Report (Lite: every 6h, Normal: every 30m)
+                report_interval = 21600 if getattr(settings, 'AUTONOMY_LITE_MODE', False) else 1800
+                if time.time() - self.last_summary_time > report_interval:
+                    try:
+                        await self._send_transparency_report()
+                    except Exception as e:
+                        logger.error(f"Transparency report failed (non-fatal): {e}")
+                    self.last_summary_time = time.time()
+
+                # Check idle
+                if getattr(self.bot, 'is_processing', False):
+                    # logger.debug("IMA: User active (Processing). Waiting...")
+                    continue
+                    
+                if hasattr(self.bot, 'last_interaction'):
+                    idle_time = time.time() - self.bot.last_interaction
+                    # Autonomy Lite: wait 10 minutes idle before triggering (vs 45s normal)
+                    idle_threshold = 600 if getattr(settings, 'AUTONOMY_LITE_MODE', False) else 45
+                    if idle_time > idle_threshold:
+                        # QUOTA GATE: Check if dev work is needed
+                        quota_met = True
+                        remaining_hours = 0.0
+                        
+                        # Apply Setting for Work Mode Toggle
+                        if getattr(settings, 'ENABLE_WORK_MODE', False):
+                            try:
+                                from src.tools.weekly_quota import is_quota_met, get_remaining_quota
+                                quota_met = is_quota_met()
+                                if not quota_met:
+                                    remaining_hours = get_remaining_quota()
+                                    # Throttle logging: only log every 5 minutes
+                                    now = time.time()
+                                    last_block_log = getattr(self, '_last_block_log', 0)
+                                    if now - last_block_log > 300:
+                                        logger.info(f"IMA: Quota unmet — {remaining_hours:.1f}h remaining. Entering WORK MODE.")
+                                        self._last_block_log = now
+                            except ImportError:
+                                pass  # Module not available, skip gate
+                        else:
+                            # Work mode explicitly disabled by config
+                            quota_met = True
+
+                        if not quota_met:
+                            # WORK MODE: Drive Ernos to do dev work instead of recreation
+                            try:
+                                await self._run_dev_work_cycle(remaining_hours)
+                            except Exception as e:
+                                logger.error(f"Dev work cycle failed: {e}")
+                            # Back off — don't check again for 2 minutes
+                            self.bot.last_interaction = time.time() - 100
+                            await asyncio.sleep(120)
+                            continue
+
+                        logger.info(f"IMA: Detected Idle ({int(idle_time)}s). Triggering Autonomy...")
+                        
+                        # LOG TO GLOBAL STREAM
+                        from src.bot import globals
+                        if hasattr(globals, 'activity_log'):
+                            ts = datetime.datetime.now().strftime("%H:%M:%S")
+                            entry = {
+                                "timestamp": ts,
+                                "scope": "SYSTEM",
+                                "type": "autonomy",
+                                "user_hash": "sys",
+                                "summary": f"Autonomy Cycle: Idle {int(idle_time)}s. Dreaming..."
+                            }
+                            globals.activity_log.append(entry)
+                        
+                        # TRIGGER AUTONOMY LOGIC
+                        try:
+                            dream_prompt = self._build_dream_prompt()
+                            context_history = ""
+                            MAX_CONTEXT_HISTORY_CHARS = 50000  # Expanded for deeper autonomous reasoning
+                            step = 0
+                            
+                            while True: # Uncapped Autonomy
+                                # Interrupt if user is active
+                                if getattr(self.bot, 'is_processing', False):
+                                    logger.info("IMA: User active. Interrupting autonomy.")
+                                    break
+                                
+                                input_text = dream_prompt if step == 0 else "[AUTONOMOUS CYCLE CONTINUES - What is your next thought or action? Use tools to explore. If you have nothing left to do, output exactly: <HALT>]"
+                                
+                                try:
+                                    # Output through the full cognitive tape pipeline
+                                    result = await self.bot.cognition.process(
+                                        input_text=input_text,
+                                        context=context_history,
+                                        complexity="COMPLEX",
+                                        request_scope="CORE",
+                                        user_id="sys",
+                                        skip_defenses=True
+                                    )
+                                    
+                                    # Extract response text AND tool outputs from the return tuple
+                                    tool_outputs = []
+                                    if isinstance(result, tuple):
+                                        response = result[0]
+                                        tool_outputs = result[2] if len(result) > 2 and result[2] else []
+                                    else:
+                                        response = result
+                                        
+                                except Exception as e:
+                                    logger.error(f"IMA Cognition Pipeline Failed: {e}", exc_info=True)
+                                    break
+
+                                # Handle Engine Failure
+                                if not response or "<HALT>" in response:
+                                    logger.info("IMA: Engine returned None or <HALT>. Stopping Dream Loop.")
+                                    break
+                                
+                                # Buffer for 30m Report
+                                self.autonomy_log_buffer.append(f"[{datetime.datetime.now().strftime('%H:%M')}] STEP {step}: {response[:150]}...")
+
+                                # Maintain conversation history — include TOOL OUTPUTS so the LLM
+                                # can see what its tools returned in the next step
+                                context_history += f"\n[STEP {step} THOUGHT]: {response}"
+                                if tool_outputs:
+                                    tool_results_text = "\n".join(str(t) for t in tool_outputs)
+                                    context_history += f"\n[STEP {step} TOOL RESULTS]:\n{tool_results_text}"
+                                if len(context_history) > MAX_CONTEXT_HISTORY_CHARS:
+                                    context_history = "[...earlier steps trimmed...]\n" + context_history[-MAX_CONTEXT_HISTORY_CHARS:]
+                                
+                                # Pure Thought Loop Breaker
+                                # Autonomy Lite: 1 step per cycle to save API budget (~25 calls/day target).
+                                max_steps = 1 if getattr(settings, 'AUTONOMY_LITE_MODE', False) else 15
+                                
+                                if step >= max_steps:
+                                    logger.info(f"IMA: Step limit Reached ({max_steps}). Ending Dream Loop.")
+                                    break
+                                
+                                # Persist Step to Core Memory
+                                await self.bot.hippocampus.observe(
+                                    user_id="CORE",
+                                    user_message=f"[AUTONOMY STEP {step}]",
+                                    bot_message=response,
+                                    channel_id=0,
+                                    is_dm=False
+                                )
+                                
+                                # STREAM TO MIND CHANNEL
+                                if hasattr(self.bot, 'send_to_mind'):
+                                    await self.bot.send_to_mind(f"**[AUTONOMY STEP {step}]**\n{response}")
+
+                                step += 1
+                                
+                                # Autonomy Lite: Much longer pause between steps to save API budget
+                                sleep_time = 30 if getattr(settings, 'AUTONOMY_LITE_MODE', False) else 2
+                                await asyncio.sleep(sleep_time)  # Brief pause between steps
+                        
+                        except Exception as e:
+                            logger.error(f"Dream Cycle Failed: {e}")
+                        
+                        # ── Continuous Crawler ─────────────────
+                        # Run one crawl cycle after each dream cycle
+                        if not getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                            try:
+                                from scripts.continuous_crawler import get_crawler
+                                # Use the bot's existing KG connection (hippocampus.graph)
+                                kg = getattr(self.bot.hippocampus, 'graph', None) if hasattr(self.bot, 'hippocampus') else None
+                                if kg is None:
+                                    logger.warning("Crawler: No KG found on bot.hippocampus.graph — will run dry")
+                                crawler = get_crawler(kg=kg)
+                                crawl_result = await self.bot.loop.run_in_executor(
+                                    None, crawler.crawl_cycle
+                                )
+                                if crawl_result and not crawl_result.get("skipped"):
+                                    src = crawl_result.get("source", "?")
+                                    new = crawl_result.get("new", 0)
+                                    logger.info(f"🕷️ Crawler cycle: {src} → {new} new facts")
+                                    if hasattr(self.bot, 'send_to_mind') and new > 0:
+                                        await self.bot.send_to_mind(
+                                            f"🕷️ **Knowledge Crawler** [{src}]: Ingested {new} new facts"
+                                        )
+                            except Exception as e:
+                                logger.debug(f"Crawler cycle skipped: {e}")
+                        else:
+                            logger.info("IMA: Skipping Crawler Cycle (Autonomy Lite Mode active)")
+                    
+                    # Debounce: Update last interaction to prevent spamming
+                    # Lite mode: 10-min cooldown between cycles. Normal: ~80s.
+                    if getattr(settings, 'AUTONOMY_LITE_MODE', False):
+                        self.bot.last_interaction = time.time()  # Full reset
+                        await asyncio.sleep(2700)  # 45 min hard cooldown between cycles (~£20/month target)
+                    else:
+                        self.bot.last_interaction = time.time() - 100  # Allow re-trigger in ~80s if still idle
+                    
+        except asyncio.CancelledError:
+            self.is_running = False
+            logger.info("IMA Loop Cancelled.")
+        except Exception as e:
+            logger.critical(f"FATAL DREAMER ERROR: {e}. Restarting loop in 10s...", exc_info=True)
+            self.is_running = False
+            try:
+                await asyncio.sleep(10)
+                logger.info("IMA Loop: Attempting auto-restart after fatal error...")
+                asyncio.create_task(self.execute())
+            except Exception as restart_err:
+                logger.error(f"IMA Loop: Auto-restart failed: {restart_err}")
+
+    async def _run_dev_work_cycle(self, remaining_hours: float):
+        """
+        WORK MODE: When quota isn't met, drive Ernos to do real dev work.
+        Uses the same LLM engine and context-enrichment pattern as the dream loop.
+        Wall-clock time is automatically tracked via start/stop_quota_clock.
+        """
+        logger.info(f"IMA WORK MODE: Starting dev cycle ({remaining_hours:.1f}h remaining)")
+        self.autonomy_log_buffer.append(f"[{datetime.datetime.now().strftime('%H:%M')}] WORK MODE START: {remaining_hours:.1f}h quota remaining")
+
+        # Start wall-clock tracking
+        try:
+            from src.tools.weekly_quota import start_quota_clock
+            start_quota_clock()
+        except Exception as e:
+            logger.warning(f"Failed to start quota clock: {e}")
+
+        dev_prompt = self._build_dev_prompt(remaining_hours)
+
+        # Build system context so the model has tool manifest, kernel, and HUD
+        # Without this, the model has no tool definitions and invents broken syntax.
+        system_context = ""
+        try:
+            from src.prompts.manager import PromptManager
+            pm = PromptManager()
+            system_context = pm.get_system_prompt(
+                timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                scope="CORE",
+                user_id="sys",
+                user_name="Ernos (Autonomous)",
+                active_engine=str(getattr(self.bot.engine_manager.get_active_engine(), 'name', 'Unknown')) if hasattr(self.bot, 'engine_manager') else "Unknown",
+                active_mode="Autonomous Dev Cycle",
+                is_core=True,
+            )
+            logger.info(f"IMA WORK MODE: System context built ({len(system_context)} chars)")
+        except Exception as e:
+            logger.error(f"IMA WORK MODE: Failed to build system context: {e}")
+
+        # Hard time cap: remaining quota + 10min grace (prevents runaway cycles)
+        cycle_start = time.time()
+        MAX_CYCLE_SECONDS = remaining_hours * 3600 + 600  # quota + 10min grace
+
+        try:
+            # Broadcast cycle start to dev channel
+            if hasattr(self.bot, 'send_to_dev_channel'):
+                await self.bot.send_to_dev_channel(
+                    f"🔧 **WORK MODE ACTIVATED**\n"
+                    f"Remaining quota: **{remaining_hours:.1f}h**\n"
+                    f"Time cap: {MAX_CYCLE_SECONDS/60:.0f} min\n"
+                    f"Starting autonomous dev cycle with Cognitive Tape Sandbox..."
+                )
+            
+            context_history = ""
+            MAX_CONTEXT_HISTORY_CHARS = 50000
+            step = 0
+            
+            while True:
+                # QUOTA RE-CHECK: Exit if quota is now met
+                try:
+                    from src.tools.weekly_quota import is_quota_met, get_remaining_quota
+                    if is_quota_met():
+                        logger.info("IMA WORK MODE: Quota met mid-cycle! Ending dev cycle.")
+                        if hasattr(self.bot, 'send_to_dev_channel'):
+                            await self.bot.send_to_dev_channel("✅ **QUOTA MET** — Dev cycle complete, switching to recreational autonomy.")
+                        break
+                except ImportError:
+                    pass
+
+                # HARD TIME CAP: Prevent runaway cycles
+                elapsed = time.time() - cycle_start
+                if elapsed > MAX_CYCLE_SECONDS:
+                    logger.warning(f"IMA WORK MODE: Hard time cap reached ({elapsed/60:.0f}min). Forcing exit.")
+                    if hasattr(self.bot, 'send_to_dev_channel'):
+                        await self.bot.send_to_dev_channel(f"⏰ **TIME CAP** — Dev cycle exceeded {MAX_CYCLE_SECONDS/60:.0f}min limit. Forcing exit.")
+                    break
+
+                if getattr(self.bot, 'is_processing', False):
+                    logger.info("IMA WORK MODE: User active, pausing dev cycle.")
+                    if hasattr(self.bot, 'send_to_dev_channel'):
+                        await self.bot.send_to_dev_channel("⏸️ **WORK MODE PAUSED** — User is active.")
+                    break
+
+                input_text = dev_prompt if step == 0 else f"[DEV WORK CYCLE CONTINUES - Quota remaining: {get_remaining_quota():.1f}h. Continue working via tape/tools. Output <HALT> if you are completely finished or stuck.]"
+                
+                try:
+                    result = await self.bot.cognition.process(
+                        input_text=input_text,
+                        context=context_history,
+                        system_context=system_context,
+                        complexity="COMPLEX",
+                        request_scope="CORE",
+                        user_id="sys",
+                        skip_defenses=True  # Bypass structural mimicry checks for internal thought
+                    )
+                    
+                    # Extract response text AND tool outputs from the return tuple
+                    tool_outputs = []
+                    if isinstance(result, tuple):
+                        response = result[0]
+                        tool_outputs = result[2] if len(result) > 2 and result[2] else []
+                    else:
+                        response = result
+                except Exception as e:
+                    logger.error(f"IMA Dev Cycle Cognition Pipeline Failed: {e}")
+                    break
+                
+                if not response or "<HALT>" in response:
+                    logger.warning(f"IMA WORK MODE: Engine returned None or <HALT> on step {step}. Exiting.")
+                    if hasattr(self.bot, 'send_to_dev_channel'):
+                        await self.bot.send_to_dev_channel(
+                            f"⚠️ **[WORK MODE STEP {step}]** Engine halted."
+                        )
+                    break
+
+                # Accumulate context — include TOOL OUTPUTS so the LLM
+                # can see what its tools returned in the next step
+                context_history += f"\n[DEV STEP {step}]: {response}"
+                if tool_outputs:
+                    tool_results_text = "\n".join(str(t) for t in tool_outputs)
+                    context_history += f"\n[DEV STEP {step} TOOL RESULTS]:\n{tool_results_text}"
+                self.autonomy_log_buffer.append(f"[{datetime.datetime.now().strftime('%H:%M')}] WORK STEP {step}: {response[:150]}...")
+                
+                # Broadcast full reasoning to dev channel
+                if hasattr(self.bot, 'send_to_dev_channel'):
+                    await self.bot.send_to_dev_channel(
+                        f"💭 **[WORK MODE — STEP {step}] REASONING:**\n{response}"
+                    )
+                
+                # Trim context
+                if len(context_history) > MAX_CONTEXT_HISTORY_CHARS:
+                    context_history = "[...earlier steps trimmed...]\n" + context_history[-MAX_CONTEXT_HISTORY_CHARS:]
+                
+                if step >= 15:
+                    logger.info("IMA WORK MODE: Maximum steps reached (15). Exiting Dev Cycle.")
+                    break
+
+                step += 1
+                await asyncio.sleep(2)
+                
+        except Exception as e:
+            logger.error(f"Fatal error in IMA Dev Cycle: {e}")
+            if hasattr(self.bot, 'send_to_dev_channel'):
+                try:
+                    await self.bot.send_to_dev_channel(f"💥 **WORK MODE CRASHED**: {e}")
+                except Exception as e:
+                    logger.warning(f"Suppressed {type(e).__name__}: {e}")
+        finally:
+            # ALWAYS stop the wall-clock timer, regardless of how the cycle ended
+            try:
+                from src.tools.weekly_quota import stop_quota_clock
+                elapsed = stop_quota_clock()
+                logger.info(f"IMA WORK MODE: Clock stopped. Logged {elapsed:.2f}h this cycle.")
+            except Exception as e:
+                logger.warning(f"Failed to stop quota clock: {e}")
+
+    async def _one_shot_dream(self, instruction: str) -> str:
+        """Executed for directed introspection (consult_ima)."""
+        logger.info(f"IMA: Processing instruction: {instruction}")
+        prompt = f"SUBCONSCIOUS REFLECTION:\nContext: {instruction}\n\nExplore this thought vaguely, metaphorically, and intuitively."
+        
+        try:
+            response = await self.bot.cognition.process(
+                input_text=prompt,
+                context="",
+                complexity="SIMPLE",
+                request_scope="CORE",
+                user_id="sys",
+                skip_defenses=True
+            )
+            if isinstance(response, tuple):
+                response = response[0]
+            return f"[DREAM]: {response}"
+        except Exception as e:
+            return f"Dream Failed: {e}"
+
+    async def run_task(self, instruction: str, user_id: str = "CORE", request_scope: str = "CORE") -> str:
+        """
+        Executed for scheduled or specific autonomous tasks (e.g. from Scheduler).
+        """
+        logger.info(f"IMA: Running Scheduled Task: {instruction}")
+        
+        prompt = (
+            f"SYSTEM OVERRIDE: SCHEDULED AUTONOMOUS TASK\n"
+            f"Directive: {instruction}\n\n"
+            f"You are waking up to perform this specific task. "
+            f"Use your tools to achieve the directive. "
+            f"Report the result clearly."
+        )
+        
+        try:
+            response = await self.bot.cognition.process(
+                input_text=prompt,
+                context="",
+                complexity="COMPLEX",
+                request_scope=request_scope,
+                user_id=user_id,
+                skip_defenses=True
+            )
+            
+            if isinstance(response, tuple):
+                response = response[0]
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Scheduled Task Failed: {e}")
+            return f"Task Failed: {e}"
+
+
+
+    async def _execute_response_tools(self, response: str, prompt_context: str, user_id: str = "CORE", request_scope: str = "CORE") -> str:
+        """Helper to parse and execute tools from a single response (One-Shot)."""
+        import re
+        import json
+        import ast
+        
+        # 1. Parse Tools & build clean response
+        tool_matches = []
+        spans_to_remove = []
+        
+        for m in re.finditer(r'\[TOOL:\s*(\w+)\(', response):
+            tool_name = m.group(1)
+            start_content = m.end() 
+            start_full = m.start() # Start of [TOOL: ...
+            
+            depth = 1
+            i = start_content
+            in_sq, in_dq = False, False
+            while i < len(response) and depth > 0:
+                ch = response[i]
+                if ch == '\\' and i + 1 < len(response): i += 2; continue
+                if ch == "'" and not in_dq: in_sq = not in_sq
+                elif ch == '"' and not in_sq: in_dq = not in_dq
+                elif not in_sq and not in_dq:
+                    if ch == '(': depth += 1
+                    elif ch == ')': depth -= 1
+                i += 1
+            
+            if depth == 0:
+                # Define args first using correct indices
+                # i is at closing parenthesis + 1
+                args = response[start_content:i-1]
+                tool_matches.append((tool_name, args))
+                
+                # Check for trailing ]
+                if i < len(response) and response[i] == ']':
+                    i += 1
+                end_full = i
+                spans_to_remove.append((start_full, end_full))
+
+        # Reconstruct response without tool calls
+        clean_response = response
+        for start, end in sorted(spans_to_remove, key=lambda x: x[0], reverse=True):
+            clean_response = clean_response[:start] + clean_response[end:]
+            
+        clean_response = clean_response.strip()
+        context_log = f"[TASK OUTPUT]: {clean_response}\n" if clean_response else "[TASK OUTPUT]: (Running Tools...)\n"
+
+        if not tool_matches:
+            return f"[TASK OUTPUT]: {response}\n"
+
+        for name, args in tool_matches:
+            try:
+                kwargs = {}
+                # Robust Argument Parsing (matches _run_dev_work_cycle)
+                try: 
+                    # Strategy 1: JSON object in args
+                    json_match = re.search(r'\{.*\}', args, re.DOTALL)
+                    if json_match:
+                        try:
+                            kwargs = json.loads(json_match.group())
+                        except json.JSONDecodeError:
+                            try:
+                                kwargs = ast.literal_eval(json_match.group())
+                            except (ValueError, SyntaxError) as e:
+                                logger.debug(f"Suppressed {type(e).__name__}: {e}")
+                    
+                    # Strategy 2: Python kwargs — parse as dict()
+                    if not kwargs:
+                        try:
+                            # Try to wrap args in dict() for evaluation
+                            # Handles create_program(path="...", code="...")
+                            kwargs = ast.literal_eval(f"dict({args})")
+                        except (ValueError, SyntaxError) as e:
+                            logger.debug(f"Suppressed {type(e).__name__}: {e}")
+                    
+                    # Strategy 3: Regex K=V (Fallback)
+                    if not kwargs:
+                        kv = re.compile(r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([^,]+))")
+                        for m in kv.finditer(args):
+                            k = m.group(1)
+                            v = m.group(2) or m.group(3) or m.group(4).strip()
+                            kwargs[k] = v
+                except Exception as e:
+                    logger.warning(f"Suppressed {type(e).__name__}: {e}")
+                
+                if not kwargs and args.strip():
+                     kwargs["raw_input"] = args.strip()
+                
+                # FLUX ENFORCEMENT: User-owned skills must respect tier limits
+                if user_id and user_id != "CORE":
+                    try:
+                        from src.core.flux_capacitor import FluxCapacitor
+                        flux = FluxCapacitor()
+                        allowed, msg = flux.consume_tool(int(user_id), name)
+                        if not allowed:
+                            context_log += f"\n[TOOL {name} BLOCKED]: Flux limit reached — {msg}"
+                            continue
+                    except (ValueError, Exception) as flux_err:
+                        logger.debug(f"Flux check skipped for {name}: {flux_err}")
+                
+                result = await ToolRegistry.execute(name, user_id=user_id, request_scope=request_scope, is_autonomy=True, bot=self.bot, **kwargs)
+                context_log += f"\n[TOOL {name} RESULT]: {result}"
+            except Exception as e:
+                context_log += f"\n[TOOL {name} ERROR]: {e}"
+        
+        return context_log
+
+    async def _send_transparency_report(self):
+        """Generates and sends a 30-minute summary of autonomous activity."""
+        try:
+            channel = self.bot.get_channel(self.summary_channel_id)
+            if not channel:
+                logger.error(f"IMA: Could not find summary channel {self.summary_channel_id}")
+                return
+
+            # Combine Buffer
+            if not self.autonomy_log_buffer:
+                summary_content = "No autonomous actions taken (System was active responding to users)."
+            else:
+                summary_content = "\n".join(self.autonomy_log_buffer[-30:]) # Last 30 items
+            
+            # Pull work shift quota status
+            quota_section = ""
+            try:
+                from src.tools.weekly_quota import get_quota_status
+                quota_section = f"\nToday's Work Shift Status:\n{get_quota_status()}\n"
+            except (ImportError, Exception) as e:
+                logger.debug(f"Could not load quota status for report: {e}")
+
+            # Generate Report Prompt
+            prompt = (
+                f"SYSTEM TRANSPARENCY REPORT (Last 30 Mins):\n"
+                f"Recent Autonomy Log:\n{summary_content}\n"
+                f"{quota_section}\n"
+                f"Task: Summarize what you did autonomously in the last 30 minutes, "
+                f"including any WORK MODE activities (dev tasks, tool calls, quota progress). "
+                f"Also propose a plan for the NEXT 30 minutes of autonomy.\n"
+                f"Format:\n"
+                f"**Past 30m**: [Summary of activities including work shift progress]\n"
+                f"**Next 30m**: [Plan]"
+            )
+            
+            report = await self.bot.cognition.process(
+                input_text=prompt,
+                context="",
+                complexity="SIMPLE",
+                request_scope="CORE",
+                user_id="sys",
+                skip_defenses=True
+            )
+            if isinstance(report, tuple):
+                report = report[0]
+            
+            # Feed the autobiography with the FULL (untruncated) reflection
+            try:
+                from src.memory.autobiography import get_autobiography_manager
+                autobio = get_autobiography_manager()
+                autobio.append_entry(
+                    entry_type="reflection",
+                    content=report,
+                    source="autonomy/30min_report"
+                )
+            except Exception as e:
+                logger.warning(f"Suppressed {type(e).__name__}: {e}")
+
+            # Chunking loop (Discord 2000-char limit)
+            header = "**[AUTONOMY 30m REPORT]**\n"
+            
+            # Helper to chunk
+            def split_text(text, limit=1900):
+                return [text[i:i+limit] for i in range(0, len(text), limit)]
+            
+            chunks = split_text(report)
+            
+            # Send header with first chunk
+            await channel.send(f"{header}{chunks[0]}")
+            
+            # Send remaining chunks
+            for chunk in chunks[1:]:
+                await channel.send(chunk)
+            
+            # Clear buffer slightly but keep context
+            self.autonomy_log_buffer = []
+            
+        except Exception as e:
+            logger.error(f"Failed to send Transparency Report: {e}")
+
+    async def _extract_wisdom(self, topic: str, insight: str) -> str:
+        """
+        Refines and saves wisdom to long-term memory.
+        """
+        try:
+            # Ensure prompt file exists
+            prompt_path = "src/prompts/dreamer_wisdom.txt"
+            from src.core.secure_loader import load_prompt
+            template = load_prompt(prompt_path)
+            if not template:
+                logger.error(f"Missing prompt file: {prompt_path}")
+                return f"ERROR: Missing {prompt_path}"
+            prompt = template.format(topic=topic, insight=insight)
+            
+            wisdom_json = await self.bot.cognition.process(
+                input_text=prompt,
+                complexity="SIMPLE",
+                request_scope="CORE",
+                user_id="sys",
+                skip_defenses=True
+            )
+            if isinstance(wisdom_json, tuple):
+                wisdom_json = wisdom_json[0]
+            
+            # Ensure directory and file exist
+            wisdom_dir = "memory/core"
+            wisdom_file = os.path.join(wisdom_dir, "realizations.txt")
+            os.makedirs(wisdom_dir, exist_ok=True)
+            
+            # Create file if it doesn't exist
+            if not os.path.exists(wisdom_file):
+                with open(wisdom_file, "w") as f:
+                    f.write("# Ernos Core Realizations\n# Auto-generated wisdom from autonomous reflection\n\n")
+            
+            # ─── Dedup Check ──────────────────────────────────
+            # Reject if >70% similar to any of the last 50 entries (data hygiene)
+            try:
+                from difflib import SequenceMatcher
+                existing = []
+                if os.path.exists(wisdom_file):
+                    with open(wisdom_file, "r") as f:
+                        existing = f.readlines()[-50:]  # Last 50 entries
+                
+                new_text = wisdom_json.lower().strip()
+                for entry in existing:
+                    entry_text = entry.lower().strip()
+                    if entry_text and SequenceMatcher(None, new_text, entry_text).ratio() > 0.7:
+                        logger.info(f"Duplicate wisdom detected, skipping: {topic}")
+                        return "Wisdom already crystallized (similar entry exists)."
+            except Exception as dedup_err:
+                logger.debug(f"Wisdom dedup check skipped: {dedup_err}")
+            
+            import datetime
+            ts = datetime.datetime.now().isoformat()
+            with open(wisdom_file, "a") as f:
+                f.write(f"[{ts}] {wisdom_json}\n")
+                
+            logger.info(f"Wisdom saved: {topic}")
+            return "Wisdom crystallized and stored in Core Memory."
+        except Exception as e:
+            logger.error(f"Wisdom Extraction Failed: {e}")
+            return f"ERROR: {e}"
+
+    def _build_dream_prompt(self) -> str:
+        """Build a context-aware dream prompt. Delegates to dream_builder module."""
+        from .dream_builder import build_dream_prompt
+        return build_dream_prompt()
+
+    def _build_dev_prompt(self, remaining_hours: float) -> str:
+        """
+        Build a dev work prompt with analysis-first workflow.
+        The bot must analyze before coding: check feedback, find bugs, read coverage.
+        """
+        from .dream_builder import build_dream_prompt
+        base = build_dream_prompt()
+
+        # ── Inject past rejection feedback ──
+        feedback_section = ""
+        try:
+            from pathlib import Path
+            import json as _json
+            fb_path = data_dir() / "core/quota/feedback_history.json"
+            if fb_path.exists():
+                fb = _json.loads(fb_path.read_text())
+                recent = fb.get("weekly_history", [])[-3:]
+                if recent:
+                    fb_lines = []
+                    for entry in recent:
+                        if entry.get("rejected_items") or entry.get("rejection_reasons"):
+                            week = entry.get("week", "?")
+                            reasons = entry.get("rejection_reasons", [])
+                            items = entry.get("rejected_items", [])
+                            fb_lines.append(f"  Week {week}: REJECTED {', '.join(items[:3])}")
+                            if reasons:
+                                fb_lines.append(f"    Reasons: {'; '.join(reasons[:2])}")
+                    if fb_lines:
+                        feedback_section = (
+                            "\nPAST REJECTION FEEDBACK (learn from these — do NOT repeat):\n"
+                            + "\n".join(fb_lines) + "\n"
+                        )
+        except Exception:
+            pass
+
+        # ── Inject work queue if it exists ──
+        queue_section = ""
+        try:
+            from pathlib import Path
+            import json as _json
+            queue_path = data_dir() / "core/quota/work_queue.json"
+            if queue_path.exists():
+                queue = _json.loads(queue_path.read_text())
+                items = queue.get("items", [])[:5]
+                if items:
+                    q_lines = [f"  [{i+1}] [{item.get('priority','NORMAL')}] {item.get('description','')}"
+                               for i, item in enumerate(items)]
+                    queue_section = (
+                        "\nWORK QUEUE (prioritized tasks — pick from this first):\n"
+                        + "\n".join(q_lines) + "\n"
+                    )
+        except Exception:
+            pass
+
+        dev_override = (
+            f"\n\n=== DEV WORK OVERRIDE ===\n"
+            f"Your daily dev quota is NOT met. You have {remaining_hours:.1f}h remaining.\n"
+            f"You MUST do development work before any recreational activity.\n"
+            f"Your quota tracks REAL time between assign_dev_task and complete_dev_task.\n"
+            f"{feedback_section}"
+            f"{queue_section}"
+            f"\nSTEP 1 — ANALYZE (mandatory before coding):\n"
+            f"  a) Use your 3D Turing Tape to navigate to relevant code sections\n"
+            f"  b) Use [TOOL: get_feedback_report()] to see what was rejected and why\n"
+            f"  c) Identify REAL work: fix failing tests, improve coverage, fix bugs\n"
+            f"\nSTEP 2 — PLAN:\n"
+            f"  Call [TOOL: start_work_session(plan='...', predicted_tasks=3)]\n"
+            f"\nSTEP 3 — EXECUTE:\n"
+            f"  a) Call [TOOL: assign_dev_task(description='...')] to start the clock\n"
+            f"  b) Do the work using your native tape operations:\n"
+            f"      - [TOOL: tape_seek(axis='z', target='...', scope='global')]\n"
+            f"      - [TOOL: tape_scan(query='...')]\n"
+            f"      - [TOOL: tape_insert(content='...')]\n"
+            f"      - [TOOL: tape_edit_code(file_path='...', target='...', replacement='...')]\n"
+            f"  c) Call [TOOL: verify_staging_item(path='...', test_command='pytest ...')] — MANDATORY\n"
+            f"  d) Call [TOOL: complete_dev_task(output_files='file1.py|file2.py', summary='...')]\n"
+            f"     ⚠ output_files is REQUIRED — list every file you created or modified\n"
+            f"\nCRITICAL TOOL ALLOWANCE:\n"
+            f"You FULLY HAVE ACCESS to `tape_seek`, `tape_scan`, `tape_insert`, `tape_write`, `tape_edit`, `tape_fork`, and `tape_delete` during this Work Mode override. Do NOT claim you cannot access your tape tools.\n"
+            f"\nRULES:\n"
+            f"  - Fix bugs > improve test coverage > add features (this priority order)\n"
+            f"  - NEVER create standalone 'systems' or 'frameworks' with no integration point\n"
+            f"  - NEVER invent new architectural concepts (no metabolic/thermodynamic/epistemic systems)\n"
+            f"  - Only modify EXISTING production code or write tests for existing src/ modules\n"
+            f"  - Every file you modify MUST be listed in output_files when completing\n"
+            f"  - If your work was rejected before, DO NOT repeat the same pattern\n"
+            f"  - Verify BEFORE completing — QA is mandatory and enforced\n"
+            f"=== END DEV WORK OVERRIDE ==="
+        )
+
+        return base + dev_override
+
+
+    # ============================================================
+    # PHASE 2: MEMORY CONSOLIDATION (Delegated)
+    # ============================================================
+    
+    async def run_consolidation(self) -> str:
+        """Memory maintenance during idle. Delegates to MemoryConsolidator."""
+        from .consolidation import MemoryConsolidator
+        consolidator = MemoryConsolidator(self.bot)
+        return await consolidator.run_consolidation()
+    
+    async def _process_episodic_memories(self) -> int:
+        """Compatibility: delegates to MemoryConsolidator."""
+        from .consolidation import MemoryConsolidator
+        consolidator = MemoryConsolidator(self.bot)
+        return await consolidator.process_episodic_memories()
+    
+    async def _update_user_bios(self) -> int:
+        """Compatibility: delegates to MemoryConsolidator."""
+        from .consolidation import MemoryConsolidator
+        consolidator = MemoryConsolidator(self.bot)
+        return await consolidator.update_user_bios()
+    
+    async def _synthesize_narrative(self) -> tuple:
+        """Compatibility: delegates to MemoryConsolidator.
+        Now returns (narrative_text, has_private_sources) tuple.
+        """
+        from .consolidation import MemoryConsolidator
+        consolidator = MemoryConsolidator(self.bot)
+        return await consolidator.synthesize_narrative()
+    
+    async def _extract_lessons_from_narrative(self, narrative: str, source_scope=None):
+        """Compatibility: delegates to MemoryConsolidator.
+        source_scope defaults to CORE_PRIVATE (safest) if not specified.
+        """
+        from .consolidation import MemoryConsolidator
+        consolidator = MemoryConsolidator(self.bot)
+        return await consolidator.extract_lessons_from_narrative(narrative, source_scope=source_scope)
+

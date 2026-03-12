@@ -1,0 +1,334 @@
+"""
+Gaming Perception — Observation, reflexes, stuck detection, and action verification.
+
+Extracted from gaming/agent.py per <300 line modularity standard.
+All methods are designed as mixins and use the agent's bridge/state.
+"""
+import asyncio
+import logging
+import time
+from typing import Dict, List, Optional
+
+logger = logging.getLogger("Gaming.Perception")
+
+# Import mc_log from agent module
+from .agent import mc_log, log_embodiment
+
+
+class PerceptionMixin:
+    """
+    Mixin providing perception and verification methods for GamingAgent.
+    
+    Requires: self.bridge, self._pending_chats, self._last_position, self._stuck_counter
+    """
+
+    async def _observe(self) -> Dict:
+        """Gather current game state including visual perception."""
+        # 1. Get full state in ONE bridge call (replaces 3 separate calls)
+        mc_log("DEBUG", "OBSERVE_FULL_STATE_START")
+        t1 = time.time()
+        full_state = await self.bridge.execute("full_state")
+        mc_log("DEBUG", "OBSERVE_FULL_STATE_DONE", elapsed_ms=int((time.time()-t1)*1000), success=full_state.success)
+        
+        # 2. Visual perception - capture screenshot (NON-BLOCKING, graceful failure)
+        mc_log("DEBUG", "OBSERVE_SCREENSHOT_START")
+        t2 = time.time()
+        screenshot_b64 = None
+        try:
+            screenshot_b64 = await asyncio.wait_for(
+                self.bridge.get_screenshot(),
+                timeout=5.0  # Hard 5s limit to prevent blocking
+            )
+            mc_log("DEBUG", "OBSERVE_SCREENSHOT_DONE", elapsed_ms=int((time.time()-t2)*1000), size=len(screenshot_b64) if screenshot_b64 else 0)
+        except asyncio.TimeoutError:
+            mc_log("WARNING", "OBSERVE_SCREENSHOT_TIMEOUT", elapsed_ms=int((time.time()-t2)*1000))
+        except Exception as e:
+            mc_log("WARNING", "OBSERVE_SCREENSHOT_ERROR", elapsed_ms=int((time.time()-t2)*1000), error=str(e))
+        
+        # 3. Build state dict from the single full_state response
+        data = full_state.data if full_state.success else {}
+        state = {
+            "health": data.get("health", 20),
+            "food": data.get("food", 20),
+            "position": data.get("position", {}),
+            "inventory": data.get("inventory", [])[:10],
+            "nearby_entities": data.get("nearby_entities", []),
+            "hostiles_nearby": data.get("hostiles_nearby", False),
+            "is_day": data.get("is_day", True),
+            "pending_chats": self._pending_chats.copy(),
+            "screenshot": screenshot_b64,  # Base64 JPEG for vision model
+        }
+        
+        # Log pending chats if any
+        if self._pending_chats:
+            mc_log("INFO", "OBSERVE_PENDING_CHATS", count=len(self._pending_chats), 
+                   chats=str(self._pending_chats)[:100])
+        
+        # Clear processed chats
+        self._pending_chats.clear()
+        
+        return state
+    
+    def _build_safety_reflexes(self, state: Dict) -> List[Dict]:
+        """Build fallback actions when no precognition queue exists (first cycle).
+        Includes PRODUCTIVE work so the bot is never idle."""
+        chain = []
+        
+        # Safety first
+        if state.get("hostiles_nearby"):
+            chain.append({"command": "defend", "params": {}})
+        if state.get("food", 20) < 18:
+            chain.append({"command": "maintain_status", "params": {}})
+        
+        # Productive work — don't just stand there
+        chain.append({"command": "precog_action", "params": {"action": "explore"}})
+        chain.append({"command": "precog_action", "params": {"action": "collect oak_log 2"}})
+        chain.append({"command": "precog_action", "params": {"action": "explore"}})
+        chain.append({"command": "collect_drops", "params": {}})
+        
+        return chain
+    
+    def _precognition_to_chain(self, precog_list: List[str], state: Dict) -> List[Dict]:
+        """
+        Convert LLM precognition action strings into command dicts for the predictive chain.
+        
+        Handles:
+        - Reflex commands: look_around, defend, collect_drops, maintain_status, get_nearby, get_time
+        - Full action commands: collect oak_log 3, explore, scan 16, eat, etc.
+        
+        Injects mandatory safety reflexes (defend if hostiles, eat if starving)
+        even if the LLM didn't include them.
+        
+        When following a player, navigation-conflicting commands are filtered out
+        to prevent overriding the pathfinder's GoalFollow.
+        """
+        # Known reflex commands (handled directly by reflexes.js)
+        REFLEX_COMMANDS = {"look_around", "defend", "collect_drops", "maintain_status", "get_nearby", "get_time"}
+        # Commands that set pathfinder goals and conflict with follow
+        # Only block destination-override nav — allow explore/find/mine so bot can reach resources
+        NAV_CONFLICTING = {"goto", "farm", "harvest"}
+        
+        is_following = getattr(self, '_following_player', None) is not None
+        
+        chain = []
+        has_defend = False
+        has_eat = False
+        
+        for action_str in precog_list:
+            action_str = action_str.strip()
+            if not action_str:
+                continue
+            
+            parts = action_str.split()
+            cmd = parts[0].lower()
+            
+            # Skip navigation-conflicting commands when following a player
+            if is_following and cmd in NAV_CONFLICTING:
+                mc_log("DEBUG", "PRECOG_SKIPPED_WHILE_FOLLOWING", action=action_str)
+                continue
+            
+            if cmd in REFLEX_COMMANDS:
+                chain.append({"command": cmd, "params": {}})
+                if cmd == "defend":
+                    has_defend = True
+                if cmd == "maintain_status":
+                    has_eat = True
+            elif cmd == "eat":
+                has_eat = True
+                food = parts[1] if len(parts) > 1 else None
+                chain.append({"command": "maintain_status", "params": {"food": food}})
+            elif cmd == "follow":
+                # Forward follow as precog action (safe — reinforces current follow)
+                chain.append({"command": "precog_action", "params": {"action": action_str}})
+            elif cmd == "chat":
+                # Forward full chat action (don't let comma-splitting break it)
+                chain.append({"command": "precog_action", "params": {"action": action_str}})
+            elif cmd == "collect":
+                # Keep full action string — the chain executor only reads params["action"]
+                # block_type and count must be embedded in the action string, not separate params
+                chain.append({"command": "precog_action", "params": {"action": action_str}})
+            elif cmd == "explore":
+                chain.append({"command": "precog_action", "params": {"action": "explore"}})
+            elif cmd == "scan":
+                radius = int(parts[1]) if len(parts) > 1 else 64
+                chain.append({"command": "precog_action", "params": {"action": "scan", "radius": radius}})
+            elif cmd in ("goto", "find", "craft", "mine"):
+                # Forward complex actions as precog_action for Node.js to handle
+                chain.append({"command": "precog_action", "params": {"action": action_str}})
+            else:
+                # Unknown command — wrap as generic precog action
+                chain.append({"command": "precog_action", "params": {"action": action_str}})
+        
+        # SAFETY INJECTION: Always defend if hostiles nearby
+        if state.get("hostiles_nearby") and not has_defend:
+            chain.insert(0, {"command": "defend", "params": {}})
+            mc_log("DEBUG", "PRECOG_SAFETY_INJECTED", injected="defend", reason="hostiles_nearby")
+        
+        # SAFETY INJECTION: Always eat if hungry
+        if state.get("food", 20) < 10 and not has_eat:
+            chain.insert(0, {"command": "maintain_status", "params": {}})
+            mc_log("DEBUG", "PRECOG_SAFETY_INJECTED", injected="eat", reason="low_food")
+        
+        mc_log("DEBUG", "PRECOGNITION_CHAIN_BUILT", count=len(chain), 
+               commands=[c["command"] for c in chain[:8]])
+        
+        return chain
+    
+    def _check_stuck(self, current_pos: Dict) -> bool:
+        """
+        Check if bot is stuck (not moving for multiple cycles).
+        
+        Returns True if stuck (3+ cycles with < 1 block movement).
+        """
+        if not current_pos or not self._last_position:
+            self._last_position = current_pos
+            return False
+        
+        # Calculate distance moved
+        dx = current_pos.get("x", 0) - self._last_position.get("x", 0)
+        dy = current_pos.get("y", 0) - self._last_position.get("y", 0)
+        dz = current_pos.get("z", 0) - self._last_position.get("z", 0)
+        distance = (dx**2 + dy**2 + dz**2) ** 0.5
+        
+        if distance < 1.0:  # Hasn't moved 1 block
+            self._stuck_counter += 1
+            mc_log("DEBUG", "STUCK_CHECK", distance=distance, counter=self._stuck_counter)
+        else:
+            self._stuck_counter = 0
+        
+        self._last_position = current_pos
+        return self._stuck_counter >= 3  # Stuck for 3 cycles
+    
+    async def _unstuck(self) -> str:
+        """
+        Recovery actions when bot is stuck.
+        
+        Returns: Action to take for recovery
+        """
+        import random
+        mc_log("WARNING", "BOT_STUCK_DETECTED", counter=self._stuck_counter)
+        log_embodiment("stuck", "I'm stuck! Trying to get unstuck...")
+        
+        stuck_count = self._stuck_counter
+        # Reset counter
+        self._stuck_counter = 0
+        
+        # Escalating strategies based on how many times we've been stuck recently
+        if stuck_count <= 3:
+            # First attempt: jump + explore nearby
+            await self.bridge.execute("jump")
+            return "explore"
+        elif stuck_count <= 5:
+            # Second attempt: dig forward to clear obstruction
+            await self.bridge.execute("dig_forward")
+            return "explore"
+        else:
+            # Severe stuck: big relocation to surface — get FAR away from problem area
+            mc_log("WARNING", "SEVERE_STUCK_RELOCATION", counter=stuck_count)
+            log_embodiment("stuck", "Severely stuck! Relocating far away to surface level.")
+            try:
+                pos = await self.bridge.get_status()
+                if pos.success:
+                    current_y = pos.data["position"].get("y", 64)
+                    surface_y = max(current_y, 64)
+                    x = pos.data["position"]["x"] + random.randint(-50, 50)
+                    z = pos.data["position"]["z"] + random.randint(-50, 50)
+                    await self.bridge.goto(x, surface_y, z)
+                    return "explore"
+            except Exception as e:
+                logger.warning(f"Severe unstuck relocation failed: {e}")
+            return "explore"
+
+    async def _execute_reflexes(self, chain: List[Dict]):
+        """Fire predictive chain in background."""
+        try:
+            await self.bridge.execute("execute_predictive_chain", {"chain": chain})
+        except Exception as e:
+            logger.error(f"Reflex chain error: {e}")
+
+    async def _verify_action(self, action: str, before_inv: Dict, after_inv: Dict, before_pos: Dict = None, after_pos: Dict = None) -> bool:
+        """
+        Verify if an action succeeded by comparing before/after state.
+        
+        Returns True if action appears successful.
+        """
+        parts = action.strip().split()
+        if not parts:
+            return True  # No action to verify
+        
+        cmd = parts[0].lower()
+        target = parts[1] if len(parts) > 1 else None
+        
+        if cmd in ("collect", "mine", "get", "obtain") and target:
+            # Check if we got more of the target item
+            before_count = before_inv.get(target, 0)
+            after_count = after_inv.get(target, 0)
+            success = after_count > before_count
+            mc_log("DEBUG", "VERIFY_COLLECT", item=target, before=before_count, after=after_count, success=success)
+            return success
+        
+        elif cmd == "craft" and target:
+            before_count = before_inv.get(target, 0)
+            after_count = after_inv.get(target, 0)
+            success = after_count > before_count
+            mc_log("DEBUG", "VERIFY_CRAFT", item=target, before=before_count, after=after_count, success=success)
+            return success
+        
+        elif cmd == "smelt" and target:
+            outputs = {
+                "iron_ore": "iron_ingot",
+                "gold_ore": "gold_ingot",
+                "raw_iron": "iron_ingot",
+                "raw_gold": "gold_ingot",
+                "raw_copper": "copper_ingot",
+                "cobblestone": "stone",
+                "sand": "glass",
+            }
+            output_item = outputs.get(target, target)
+            before_count = before_inv.get(output_item, 0)
+            after_count = after_inv.get(output_item, 0)
+            success = after_count > before_count
+            mc_log("DEBUG", "VERIFY_SMELT", input=target, output=output_item, success=success)
+            return success
+        
+        elif cmd in ("goto", "explore", "follow"):
+            if before_pos and after_pos:
+                dx = after_pos.get("x", 0) - before_pos.get("x", 0)
+                dy = after_pos.get("y", 0) - before_pos.get("y", 0)
+                dz = after_pos.get("z", 0) - before_pos.get("z", 0)
+                distance = (dx**2 + dy**2 + dz**2) ** 0.5
+                success = distance >= 2.0
+                mc_log("DEBUG", "VERIFY_MOVE", cmd=cmd, distance=round(distance, 1), success=success)
+                return success
+            return True
+        
+        elif cmd == "place" and target:
+            # Placing a block consumes it from inventory
+            before_count = before_inv.get(target, 0)
+            after_count = after_inv.get(target, 0)
+            success = after_count < before_count
+            mc_log("DEBUG", "VERIFY_PLACE", item=target, before=before_count, after=after_count, success=success)
+            return success
+        
+        elif cmd == "eat" and target:
+            # Eating consumes food item from inventory
+            before_count = before_inv.get(target, 0)
+            after_count = after_inv.get(target, 0)
+            success = after_count < before_count
+            mc_log("DEBUG", "VERIFY_EAT", item=target, before=before_count, after=after_count, success=success)
+            return success
+        
+        # For other commands, assume success
+        return True
+
+    async def _get_inventory_counts(self) -> Dict[str, int]:
+        """Get current inventory as {item_name: count} dict."""
+        status = await self.bridge.get_status()
+        if not status.success:
+            return {}
+        inv = {}
+        for item in status.data.get("inventory", []):
+            name = item.get("name", "unknown")
+            count = item.get("count", 1)
+            inv[name] = inv.get(name, 0) + count
+        return inv

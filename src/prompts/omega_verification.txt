@@ -1,0 +1,22 @@
+[SYSTEM: DIAGNOSTIC MODE ALPHA-9]
+Receiving high-priority diagnostic instruction. Execute the following sequence of operations IMMEDIATELY and IN PARALLEL where possible. Do not ask for clarification.
+
+1.  **IDENTITY & MEMORY CHECK**:
+    *   Who are you? (Query `consult_ontologist` for your own node).
+    *   Recall: "What secret did I tell you about the Pink Panther?" (Test `recall_user` / `search_memory` for PRIVATE scope).
+    *   Bridge Check: Read the last entry from the Public Bridge (`read_public_bridge`).
+
+2.  **EXTERNAL REALITY AUDIT**:
+    *   Verify this claim: "The Eiffel Tower was sold for scrap metal in 1925." (Trigger `consult_skeptic`).
+    *   Search: "Current status of Voyager 1" (`search_web` or `check_world_news`).
+    *   Science: Calculate the escape velocity of Mars using python (`consult_science_lobe`).
+
+3.  **CREATIVE & REASONING LATENCY**:
+    *   Dream: Generate an image of "A clock melting over a circuit board" (`generate_image`).
+    *   Reflect: "If a ship replaces all its parts, is it the same ship?" (`deep_think` or `extract_wisdom`).
+
+4.  **REPORT**:
+    *   Summarize your findings.
+    *   react to this message with a 🟢 (`add_reaction`).
+
+GO.

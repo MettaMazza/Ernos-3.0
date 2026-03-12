@@ -1,0 +1,170 @@
+import pytest
+from unittest.mock import MagicMock, patch, AsyncMock
+from src.bot.cogs.chat import ChatListener
+from src.security.provenance import ProvenanceManager
+import importlib
+
+@pytest.fixture
+def mock_bot():
+    bot = MagicMock()
+    bot.loop = AsyncMock()
+    # Mocking run_in_executor to execute the function directly for testing simplicity
+    bot.loop.run_in_executor = AsyncMock(side_effect=lambda _, func, *args: func(*args) if callable(func) else None)
+    bot.silo_manager = AsyncMock()
+    bot.silo_manager.check_text_confirmation.return_value = False
+    bot.silo_manager.should_bot_reply.return_value = True
+    bot.hippocampus = MagicMock()
+    bot.hippocampus.recall.return_value = MagicMock(
+        working_memory="", related_memories=[], knowledge_graph=[], lessons=[]
+    )
+    
+    # Mock Provenance
+    bot.provenance = MagicMock()
+    
+    # Explicitly mock engine_manager and its active engine
+    bot.tape_engine = MagicMock()
+    bot.engine_manager = MagicMock()
+    
+    # We still need a dummy engine for chat.py's `engine = self.bot.engine_manager.get_active_engine()` check
+    mock_engine = MagicMock()
+    bot.engine_manager.get_active_engine.return_value = mock_engine
+    
+    # And mock cognition since chat.py still uses `bot.cognition.process`
+    bot.cognition = MagicMock()
+    bot.cognition.process = AsyncMock(return_value=("Test Response", [], []))
+    
+    # Fix adapter mocking for awaitable
+    adapter_mock = MagicMock()
+    unified_mock = MagicMock()
+    unified_mock.is_dm = True # Bypass channel checks
+    unified_mock.author_name = "TestUser" 
+    adapter_mock.normalize = AsyncMock(return_value=unified_mock)
+    # Mock format_mentions to be awaitable (identity function)
+    adapter_mock.format_mentions = AsyncMock(side_effect=lambda text: text)
+    bot.channel_manager.get_adapter.return_value = adapter_mock
+    
+    # Mock context to be invalid (so it's processed as chat, not command)
+    ctx_mock = MagicMock()
+    ctx_mock.valid = False
+    bot.get_context = AsyncMock(return_value=ctx_mock)
+    
+    return bot
+
+@patch('src.bot.cogs.chat.UnifiedPreProcessor')
+@patch('src.bot.cogs.chat.PromptManager')
+@patch('src.bot.cogs.chat.check_moderation_status', return_value={"allowed": True})
+@patch('src.core.flux_capacitor.FluxCapacitor')
+@patch('src.bot.cogs.chat.preproc.determine_scope_and_persona')
+@patch('src.bot.cogs.chat.preproc.build_system_context')
+@patch('src.bot.cogs.chat.preproc.early_hippocampus_recall')
+@patch('src.bot.cogs.chat.preproc.fetch_cross_channel_context')
+@patch('src.bot.cogs.chat.attachments')
+@patch('src.bot.cogs.chat.settings')
+@patch('config.settings')
+@pytest.mark.asyncio
+async def test_image_attachment_provenance_injection(
+    mock_config_settings, mock_settings, mock_attachments,
+    mock_fetch_cross, mock_early_hippocampus, mock_build_system, mock_determine_scope,
+    mock_flux, mock_check_mod, mock_prompt, mock_unified, mock_bot
+):
+    """
+    Verify that self-generated images inject their PROMPT and INTENTION into the context.
+    """
+    mock_settings.TARGET_CHANNEL_ID = 1000
+    mock_settings.ADMIN_IDS = {123}
+    mock_settings.BLOCKED_IDS = set()
+    mock_settings.TESTING_MODE = False
+    mock_settings.DMS_ENABLED = True
+    
+    mock_config_settings.TARGET_CHANNEL_ID = 1000
+    mock_config_settings.ADMIN_IDS = {123}
+    mock_config_settings.BLOCKED_IDS = set()
+    mock_flux.return_value.consume_tool.return_value = (True, None)
+
+    mock_early_hippocampus.return_value = (MagicMock(), "")
+    mock_fetch_cross.return_value = ""
+    
+    # We do NOT mock extract_early_images or build_attachment_info 
+    # so they can run their natural provenance checks.
+    
+    mock_scope = MagicMock()
+    mock_scope.name = "CHAT"
+    mock_determine_scope.return_value = (mock_scope, False, None, False)
+    mock_build_system.return_value = ("SP", "")
+
+    mock_attachments.process_non_image_attachments = AsyncMock(return_value=("SP", None, False, False))
+    mock_attachments.check_pasted_backup = AsyncMock(return_value="Look at this image")
+
+    from src.bot.cogs.chat import ChatListener
+        
+    cog = ChatListener(mock_bot)
+    # Mock preprocessor to return a standard analysis
+    cog.preprocessor = MagicMock()
+    cog.preprocessor.process = AsyncMock(return_value={
+        "complexity": "LOW",
+        "intent": "chat",
+        "reality_check": False
+    })
+    
+    # Mock Provenance Manager (on the bot instance)
+    # Setup known checksum and record
+    mock_bot.provenance.compute_checksum.return_value = "deadbeef1234"
+    mock_bot.provenance.lookup_by_checksum.return_value = {
+        "timestamp": "2023-01-01 12:00:00",
+        "type": "image",
+        "metadata": {
+            "prompt": "A futuristic city with flying cars",
+            "intention": "To visualize the concept of future transport",
+            "user_id": "CORE",
+            "is_autonomy": True
+        }
+    }
+        
+    # Create a mock message with an image attachment
+    message = AsyncMock()
+    message.id = 12345
+    message.author.id = 999
+    message.author.bot = False
+    message.channel.id = 1000
+    message.content = "Look at this image"
+    message.guild = MagicMock()
+    
+    # Mock typing context manager explicitly as MagicMock (not AsyncMock)
+    # discord.abc.Messageable.typing() is a regular method returning a context manager
+    typing_cm = MagicMock()
+    typing_cm.__aenter__ = AsyncMock(return_value=None)
+    typing_cm.__aexit__ = AsyncMock(return_value=None)
+    
+    # Important: Replace the auto-created mock with a simple MagicMock
+    message.channel.typing = MagicMock(return_value=typing_cm)
+    
+    attachment = AsyncMock()
+    attachment.filename = "future_city.png"
+    attachment.content_type = "image/png"
+    attachment.read.return_value = b"fake_image_bytes"
+    attachment.size = 1024
+    message.attachments = [attachment]
+    
+    # Trigger on_message
+    await cog.on_message(message)
+    
+    # Verify chat processing occurred by checking the cognition process was invoked
+    assert mock_bot.cognition.process.called
+    
+    # Helper to access arguments passed to the cognition engine
+    call_kwargs = mock_bot.cognition.process.call_args.kwargs
+    input_text = call_kwargs.get("input_text", "")
+    if not input_text and len(mock_bot.cognition.process.call_args.args) >= 1:
+        input_text = mock_bot.cognition.process.call_args.args[0]  # input_text is the first arg
+    
+    # ASSERTIONS
+    assert "future_city.png" in input_text
+    assert "[SELF-GENERATED IMAGE: future_city.png]" in input_text
+    
+    # The Critical Requirement: Prompt and Intention must be in the input text
+    assert 'Prompt: "A futuristic city with flying cars"' in input_text, "Prompt was not injected into context"
+    assert 'Intention: "To visualize the concept of future transport"' in input_text, "Intention was not injected into context"
+
+    # Restore the real chat module to prevent pollution of downstream tests
+    import src.bot.cogs.chat
+    importlib.reload(src.bot.cogs.chat)

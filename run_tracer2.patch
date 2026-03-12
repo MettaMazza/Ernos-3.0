@@ -1,0 +1,11 @@
+--- src/gaming/agent.py
++++ src/gaming/agent.py
+@@ -594,6 +594,7 @@
+                             _has_task_chat = False
+                             if not _follow_dismissed:
++                                print(f"DEBUG CHATS: {_seen_chats} + {self._pending_chats}")
+                                 for _chat in list(_seen_chats) + list(self._pending_chats):
+                                     _words = set(_chat.get('message', '').lower().split())
++                                    print(f"DEBUG WORDS: {_words} & {_TASK_KEYWORDS}")
+                                     if _words & _TASK_KEYWORDS:
+                                         _has_task_chat = True
