@@ -1,0 +1,2 @@
+./memory/core/current_project.json
+./ernos_bot.log

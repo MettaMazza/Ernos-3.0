@@ -27,3 +27,4 @@ test_results.*
 audit_mocks_output.txt
 investigation_logs.txt
 user_report_data.json
+shared/ErnosClaw.apk
